@@ -20,7 +20,11 @@ a = Analysis(
     pathex=[SRC],
     binaries=[],
     datas=[
-        (str(ROOT / "readme.md"), "."),
+        (str(ROOT / "readme.md"),          "."),
+        (str(ROOT / "bimap.ico"),           "."),
+        (str(ROOT / "bimap_splash.png"),    "."),
+        # QSS theme — keep relative path matching THEME_QSS_PATH in config.py
+        (str(ROOT / "src" / "bimap" / "ui" / "dark_theme.qss"), "bimap/ui"),
     ],
     hiddenimports=[
         # PyQt6 plugins that auto-discovery may miss
@@ -31,11 +35,6 @@ a = Analysis(
         "diskcache",
         "geopy",
         "geopy.geocoders",
-        # PDF
-        "reportlab",
-        "reportlab.lib",
-        "reportlab.platypus",
-        "reportlab.graphics",
         # Data sources
         "openpyxl",
         "sqlalchemy",
@@ -46,7 +45,6 @@ a = Analysis(
         "keyring.backends",
         # Pydantic
         "pydantic",
-        "pydantic.v1",
         "pydantic_core",
         # Standard
         "csv",

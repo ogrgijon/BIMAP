@@ -10,8 +10,8 @@
 
 #define MyAppName      "BIMAP"
 #define MyAppVersion   "0.1.0"
-#define MyAppPublisher "BIMAP Team"
-#define MyAppURL       "https://github.com/yourorg/bimap"
+#define MyAppPublisher "OGRGijón"
+#define MyAppURL       "https://github.com/ogrgijon/bimap"
 #define MyAppExeName   "BIMAP.exe"
 #define MyAppDist      "..\installer\dist\BIMAP"
 

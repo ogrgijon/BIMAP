@@ -23,7 +23,12 @@ from bimap.config import APP_NAME, APP_ORGANISATION, APP_VERSION, THEME_QSS_PATH
 os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts=false")
 
 # Assets live at the project root (two levels above src/bimap/)
-_ROOT = Path(__file__).parent.parent.parent
+# In a frozen PyInstaller bundle sys._MEIPASS is the extraction directory and
+# all datas end up there, so _ROOT points to it directly.
+if getattr(sys, "frozen", False):
+    _ROOT = Path(sys._MEIPASS)          # type: ignore[attr-defined]
+else:
+    _ROOT = Path(__file__).parent.parent.parent
 
 
 def main() -> int:

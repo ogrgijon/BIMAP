@@ -1,0 +1,77 @@
+name: Build & Release (Windows x64 Portable)
+
+# Triggers on any version tag: git tag v0.2.0 && git push --tags
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows-portable:
+    name: PyInstaller → portable zip → GitHub Release
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Python ────────────────────────────────────────────────────────
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # ── 3. Dependencies ──────────────────────────────────────────────────
+      - name: Install project + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      # ── 4. Build with PyInstaller (onedir) ───────────────────────────────
+      - name: Build portable bundle
+        run: |
+          pyinstaller installer/bimap.spec `
+            --distpath installer/dist `
+            --workpath installer/build `
+            --noconfirm
+
+      # ── 5. Zip the onedir output ─────────────────────────────────────────
+      - name: Package as portable zip
+        shell: pwsh
+        run: |
+          $tag  = "${{ github.ref_name }}"
+          $name = "BIMAP-${tag}-windows-x64-portable"
+          # Place zip directly in the workspace root for easy upload
+          Compress-Archive `
+            -Path   "installer\dist\BIMAP\*" `
+            -DestinationPath "${name}.zip"
+          echo "ZIP_NAME=${name}.zip" >> $env:GITHUB_ENV
+
+      # ── 6. Create / update GitHub Release and attach zip ─────────────────
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "BIMAP ${{ github.ref_name }}"
+          body: |
+            ## BIMAP ${{ github.ref_name }} — Windows x64 Portable
+
+            **No installation required.** Extract the zip and run `BIMAP.exe`.
+
+            ### Requirements
+            - Windows 10 / 11 (x64)
+            - No Python installation needed — everything is bundled
+
+            ### What's included
+            - `BIMAP.exe` — main application
+            - All required libraries (Qt, Pydantic, requests, …)
+            - Dark theme, splash screen, application icon
+
+            ### First run
+            User data (projects, tile cache) is stored in `%USERPROFILE%\.bimap\`.
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          files: ${{ env.ZIP_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
