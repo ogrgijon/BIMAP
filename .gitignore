@@ -1,0 +1,77 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+
+# ── Virtual environment ────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# ── Distribution / packaging ──────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+
+# ── Test / coverage ────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.lcov
+
+# ── Editor & IDE ──────────────────────────────────────────────────────────────
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+
+# ── PyInstaller ───────────────────────────────────────────────────────────────
+installer/dist/
+installer/build/
+*.spec.bak
+
+# ── BIMAP runtime files ───────────────────────────────────────────────────────
+# Tile cache (diskcache creates a directory)
+tile_cache/
+*.db
+*.db-shm
+*.db-wal
+
+# Auto-save and backup files
+*.bimap.bak
+autosave_*.bimap
+
+# Exported PDFs generated during development
+*.pdf
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Secrets / credentials ─────────────────────────────────────────────────────
+.env
+*.env.local
+secrets.json
+credentials.json
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
