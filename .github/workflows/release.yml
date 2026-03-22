@@ -1,4 +1,4 @@
-name: Build and Release (Windows x64 Portable EXE)
+name: Build and Release (Windows x64)
 
 # Fires when a version tag is pushed: git tag v0.2.0 && git push --tags
 on:
@@ -7,8 +7,8 @@ on:
       - "v*"
 
 jobs:
-  build-windows-portable:
-    name: PyInstaller onefile -> GitHub Release
+  build-windows:
+    name: PyInstaller -> GitHub Release
     runs-on: windows-latest
 
     steps:
@@ -27,6 +27,7 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller pyinstaller-hooks-contrib
 
+      # ── Portable single-file EXE ─────────────────────────────────────────
       - name: Build portable BIMAP.exe (onefile)
         shell: pwsh
         run: |
@@ -35,23 +36,45 @@ jobs:
             --workpath installer/build `
             --noconfirm
 
-      - name: Rename exe with version tag
+      - name: Rename portable exe with version tag
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $src = "installer\dist\BIMAP.exe"
           $dst = "BIMAP-${tag}-windows-x64-portable.exe"
           Move-Item $src $dst
-          Add-Content $env:GITHUB_ENV "EXE_NAME=$dst"
+          Add-Content $env:GITHUB_ENV "PORTABLE_EXE=$dst"
 
-      - name: Create GitHub Release and upload EXE
+      # ── Onedir folder -> zip  (faster startup, better for frequent use) ──
+      - name: Build onedir BIMAP folder
+        shell: pwsh
+        run: |
+          pyinstaller installer/bimap.spec `
+            --distpath installer/dist `
+            --workpath installer/build `
+            --noconfirm
+
+      - name: Zip onedir folder with version tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $src = "installer\dist\BIMAP"
+          $dst = "BIMAP-${tag}-windows-x64.zip"
+          Compress-Archive -Path "$src\*" -DestinationPath $dst
+          Add-Content $env:GITHUB_ENV "ONEDIR_ZIP=$dst"
+
+      # ── Create GitHub Release and attach both artifacts ──────────────────
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: "BIMAP ${{ github.ref_name }}"
           body: |
-            ## BIMAP ${{ github.ref_name }} - Windows x64 Portable
+            ## BIMAP ${{ github.ref_name }} — Windows x64
 
-            **No installation required.** Download and double-click BIMAP.exe.
+            | File | Description |
+            |------|-------------|
+            | `BIMAP-*-portable.exe` | **Portable** — single file, run anywhere, no install needed (~60 MB) |
+            | `BIMAP-*-windows-x64.zip` | **Folder build** — extract and run `BIMAP.exe`, faster startup for frequent use |
 
             ### System requirements
             - Windows 10 / 11 (x64)
@@ -65,6 +88,8 @@ jobs:
             Projects and tile cache are stored in `%USERPROFILE%\.bimap\`
           draft: false
           prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
-          files: ${{ env.EXE_NAME }}
+          files: |
+            ${{ env.PORTABLE_EXE }}
+            ${{ env.ONEDIR_ZIP }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

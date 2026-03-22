@@ -59,16 +59,20 @@ Move-Item -Force $exeSrc $exeDst
 Write-Host "    -> $exeDst" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
-# 2. Optionally build onedir (for Inno Setup)
+# 2. Optionally build onedir folder and zip it
 # ---------------------------------------------------------------------------
 if (-not $PortableOnly) {
-    Write-Host "[2/3] Building onedir BIMAP folder (for installer)..." -ForegroundColor Cyan
+    Write-Host "[2/3] Building onedir BIMAP folder..." -ForegroundColor Cyan
     & $PyI installer\bimap.spec `
         --distpath $DistPath `
         --workpath $BuildPath `
         --noconfirm
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller onedir build failed (exit $LASTEXITCODE)" }
-    Write-Host "    -> $DistPath\BIMAP\" -ForegroundColor Green
+
+    $zipSrc = Join-Path $DistPath "BIMAP"
+    $zipDst = Join-Path $Root "BIMAP-v${Version}-windows-x64.zip"
+    Compress-Archive -Path "$zipSrc\*" -DestinationPath $zipDst -Force
+    Write-Host "    -> $zipDst" -ForegroundColor Green
 } else {
     Write-Host "[2/3] Skipped onedir build (-PortableOnly)." -ForegroundColor DarkGray
 }
@@ -101,5 +105,5 @@ Write-Host ""
 Write-Host "Build complete." -ForegroundColor Green
 Write-Host "  Portable EXE : BIMAP-v${Version}-windows-x64-portable.exe"
 if (-not $PortableOnly) {
-    Write-Host "  Onedir       : installer\dist\BIMAP\"
+    Write-Host "  Folder ZIP   : BIMAP-v${Version}-windows-x64.zip"
 }
