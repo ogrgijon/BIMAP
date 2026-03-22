@@ -57,9 +57,9 @@ TILE_PROVIDERS: dict[str, dict] = {
 }
 DEFAULT_TILE_PROVIDER: str = "osm_standard"
 
-# ── HTTP Headers (OSM usage policy) ──────────────────────────────────────────
+# ── HTTP Headers (OSM usage policy requires a meaningful User-Agent) ─────────
 HTTP_HEADERS: dict[str, str] = {
-    "User-Agent": f"{APP_NAME}/{APP_VERSION} (educational/development use)",
+    "User-Agent": f"{APP_NAME}/{APP_VERSION} (https://github.com/ogrgijon/BIMAP)",
     "Accept": "image/png,image/*,*/*",
 }
 

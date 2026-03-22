@@ -41,6 +41,8 @@ Thumbs.db
 installer/dist/
 installer/build/
 *.spec.bak
+# Portable release artifact produced locally by build_installer.ps1
+BIMAP-v*-windows-x64-portable.exe
 
 # ── BIMAP runtime files ───────────────────────────────────────────────────────
 # Tile cache (diskcache creates a directory)
@@ -62,9 +64,18 @@ logs/
 
 # ── Secrets / credentials ─────────────────────────────────────────────────────
 .env
+.env.*
 *.env.local
 secrets.json
 credentials.json
+token.json
+*.key
+*.pem
+*.p12
+*.pfx
+# Never commit connection strings or API keys
+connection_strings.*
+api_keys.*
 
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
