@@ -51,7 +51,7 @@ tile_cache/
 *.db
 *.db-shm
 *.db-wal
-
+TODO.md
 # Auto-save and backup files
 *.bimap.bak
 autosave_*.bimap
@@ -87,3 +87,4 @@ api_keys.*
 ehthumbs.db
 Thumbs.db
 desktop.ini
+TODO.md
