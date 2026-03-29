@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 )
 
 from bimap.engine.delimitation import DelimitationResult, fetch_places_with_polygon
+from bimap.i18n import t
 
 
 class DelimitationDialog(QDialog):
@@ -32,7 +33,7 @@ class DelimitationDialog(QDialog):
 
     def __init__(self, current_name: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Set Delimitation")
+        self.setWindowTitle(t("Set Delimitation"))
         self.setMinimumWidth(480)
         self.result_item: DelimitationResult | None = None
         self.clear_mode: bool = False
@@ -44,10 +45,10 @@ class DelimitationDialog(QDialog):
 
         if current_name:
             layout.addWidget(
-                QLabel(f"<b>Current delimitation:</b> {current_name}")
+                QLabel(f"<b>{t('Current delimitation:')}</b> {current_name}")
             )
 
-        layout.addWidget(QLabel("Search for a city, province, country, etc.:"))
+        layout.addWidget(QLabel(t("Search for a city, province, country, etc.:")))
 
         row_w = QWidget()
         row = QHBoxLayout(row_w)
@@ -55,7 +56,7 @@ class DelimitationDialog(QDialog):
         self._input = QLineEdit()
         self._input.setPlaceholderText("e.g.  Madrid  |  Catalonia  |  Argentina")
         self._input.returnPressed.connect(self._do_search)
-        btn_search = QPushButton("Search")
+        btn_search = QPushButton(t("Search"))
         btn_search.clicked.connect(self._do_search)
         row.addWidget(self._input)
         row.addWidget(btn_search)
@@ -71,7 +72,7 @@ class DelimitationDialog(QDialog):
 
         btn_box = QDialogButtonBox()
         btn_ok = btn_box.addButton(QDialogButtonBox.StandardButton.Ok)
-        btn_clear = btn_box.addButton("Clear Delimitation", QDialogButtonBox.ButtonRole.ResetRole)
+        btn_clear = btn_box.addButton(t("Clear Delimitation"), QDialogButtonBox.ButtonRole.ResetRole)
         btn_cancel = btn_box.addButton(QDialogButtonBox.StandardButton.Cancel)
         btn_ok.clicked.connect(self._on_accept)
         btn_clear.clicked.connect(self._on_clear)
@@ -82,11 +83,11 @@ class DelimitationDialog(QDialog):
         query = self._input.text().strip()
         if not query:
             return
-        self._status.setText("Searching…")
+        self._status.setText(t("Searching…"))
         self._list.clear()
         results = fetch_places_with_polygon(query)
         if not results:
-            self._status.setText("No results found.")
+            self._status.setText(t("No results found."))
             return
         self._results = results
         for r in results:
@@ -101,7 +102,7 @@ class DelimitationDialog(QDialog):
     def _on_accept(self) -> None:
         row = self._list.currentRow()
         if row < 0 or row >= len(self._results):
-            self._status.setText("Please select a result first.")
+            self._status.setText(t("Please select a result first."))
             return
         self.result_item = self._results[row]
         self.accept()

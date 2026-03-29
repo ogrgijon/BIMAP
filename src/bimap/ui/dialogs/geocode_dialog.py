@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 )
 
 from bimap.engine.geocoding import GeoResult, geocode
+from bimap.i18n import t
 
 
 class GeocodeDialog(QDialog):
@@ -23,23 +24,23 @@ class GeocodeDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Search Location")
+        self.setWindowTitle(t("Search Location"))
         self.setMinimumWidth(420)
         self._result: GeoResult | None = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Enter address or place name:"))
+        layout.addWidget(QLabel(t("Enter address or place name:")))
 
         search_row_widget = QWidget()
         from PyQt6.QtWidgets import QHBoxLayout
         row = QHBoxLayout(search_row_widget)
         row.setContentsMargins(0, 0, 0, 0)
         self._input = QLineEdit()
-        self._input.setPlaceholderText("e.g. Madrid, Spain")
+        self._input.setPlaceholderText(t("e.g. Madrid, Spain"))
         self._input.returnPressed.connect(self._do_search)
-        btn = QPushButton("Search")
+        btn = QPushButton(t("Search"))
         btn.clicked.connect(self._do_search)
         row.addWidget(self._input)
         row.addWidget(btn)
@@ -63,11 +64,11 @@ class GeocodeDialog(QDialog):
         query = self._input.text().strip()
         if not query:
             return
-        self._status.setText("Searching…")
+        self._status.setText(t("Searching…"))
         self._list.clear()
         results = geocode(query)
         if not results:
-            self._status.setText("No results found.")
+            self._status.setText(t("No results found."))
             return
         self._results = results
         for r in results:

@@ -115,7 +115,7 @@ BIMAP is a desktop tool that lets analysts, consultants, and decision-makers **d
 - A virtual environment (recommended)
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/bimap.git
+git clone https://github.com/ogrgijon/BIMAP.git
 cd bimap
 python -m venv .venv
 # Windows
@@ -276,20 +276,11 @@ python -m pytest tests/ --cov=src/bimap --cov-report=term-missing
 ### Portable EXE (recommended — no install required)
 
 ```powershell
-# Install PyInstaller into the project venv
-pip install pyinstaller pyinstaller-hooks-contrib
-
-# Build — produces installer\dist\BIMAP.exe (~60 MB, fully self-contained)
-pyinstaller installer\bimap_portable.spec `
-    --distpath installer\dist `
-    --workpath installer\build `
-    --noconfirm
-
-# Or use the build script (renames exe with version number)
-.\installer\build_installer.ps1 -Version 0.2.0 -PortableOnly
+# Build portable EXE (renames the output with the version number)
+.\installer\build_installer.ps1 -Version 0.2.1 -PortableOnly
 ```
 
-Output: `BIMAP-v0.2.0-windows-x64-portable.exe` — double-click to run, no Python needed.
+Output: `BIMAP-v0.2.1-windows-x64-portable.exe` — double-click to run, no Python needed.
 
 ### Onedir build (for Inno Setup installer)
 
@@ -306,9 +297,9 @@ pyinstaller installer\bimap.spec `
 Push a version tag to trigger the release workflow:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
-# GitHub Actions builds and attaches BIMAP-v0.2.0-windows-x64-portable.exe to the Release page
+git tag v0.2.1
+git push origin v0.2.1
+# GitHub Actions builds and attaches BIMAP-v0.2.1-windows-x64-portable.exe to the Release page
 ```
 
 ---
@@ -326,12 +317,18 @@ Please follow the existing code style (PEP 8, type hints, Pydantic models for do
 
 ## 10. Security Notes
 
+> **Known vulnerability (SEC-005 — MEDIUM):** REST API auth tokens and SQL
+> connection strings are stored **in plaintext** inside `.bimap` project files.
+> Do **not** put real credentials into BIMAP projects shared via version control
+> or cloud storage until keyring-backed credential storage is implemented.
+> Tracked in the project backlog.
+
 ### Credential storage
 `DataSource` connection parameters (SQL connection strings, API tokens, bearer tokens) are stored **in plaintext** inside `.bimap` project files.
 
 - **Do not commit `.bimap` files containing real credentials** to version control.
 - Add your project files to `.gitignore` if they reference production databases or APIs.
-- For production use, a secrets-manager integration (e.g. environment variables, Vault) would be required — this is not yet implemented.
+- For production use, a secrets-manager integration (e.g. environment variables, `keyring`, Vault) would be required — this is not yet implemented.
 
 ### SQL query execution
 The SQL connector enforces a `SELECT`-only guard (rejects queries not starting with `SELECT`) and passes queries through SQLAlchemy's `text()` parameterisation. However, **the user constructs the query string** — treat any query from an untrusted source with appropriate caution.

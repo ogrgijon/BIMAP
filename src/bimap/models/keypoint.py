@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-from bimap.models.zone import DataBinding
+from bimap.models.zone import DataBinding, MetadataKeyBinding
 
 
 class InfoCardField(BaseModel):
@@ -37,6 +37,10 @@ class Keypoint(BaseModel):
     layer: str = "Default"
     keynote_number: int | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
+    metadata_hidden: list[str] = Field(default_factory=list)           # keys hidden from BIMAP_DATA
+    metadata_bindings: dict[str, MetadataKeyBinding] = Field(default_factory=dict)  # key → source binding
+    extension_html: str = ""         # optional HTML5/CSS/JS viewer extension
+    form_design_id: str = ""         # UUID str of the FormDesign linked to this keypoint
 
     @property
     def name(self) -> str:

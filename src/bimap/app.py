@@ -19,6 +19,13 @@ from PyQt6.QtWidgets import QApplication, QSplashScreen
 
 from bimap.config import APP_NAME, APP_ORGANISATION, APP_VERSION, THEME_QSS_PATH
 
+# QWebEngineView requires its module to be imported BEFORE QApplication is created.
+# Do it here unconditionally so the viewer dialog works regardless of import order.
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView  # noqa: F401
+except ImportError:
+    pass  # PyQt6-WebEngine not installed; viewer will fall back to system browser
+
 # Suppress Qt font-directory warnings (harmless on systems without certain fonts)
 os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts=false")
 
@@ -67,7 +74,31 @@ def main() -> int:
     window.show()
     if splash is not None:
         splash.finish(window)
-    return app.exec()
+    exit_code = app.exec()
+    # Python 3.13 fix: wait for all Qt thread-pool workers to finish before the
+    # interpreter tears down the threading module (avoids _DeleteDummyThreadOnDel
+    # __del__ TypeError during interpreter shutdown).
+    # After waitForDone the Qt threads are idle but their Python "dummy thread"
+    # wrappers may not have been GC'd yet.  Force a full GC cycle now, while
+    # threading._active_limbo_lock is still valid, so __del__ fires cleanly.
+    from PyQt6.QtCore import QThreadPool
+    pool = QThreadPool.globalInstance()
+    pool.setMaxThreadCount(1)   # stop spawning new threads
+    pool.waitForDone(5000)
+    pool.setMaxThreadCount(0)   # release all idle threads back to OS
+
+    # Close the tile disk-cache so diskcache's SQLite connections are not
+    # closed by the garbage collector after threading has torn down.
+    try:
+        from bimap.ui.map_canvas.tile_fetcher import get_tile_cache
+        get_tile_cache().close()
+    except Exception:  # noqa: BLE001
+        pass
+
+    import gc as _gc
+    _gc.collect()
+    _gc.collect()   # two passes: first frees refs, second frees the containers
+    return exit_code
 
 
 if __name__ == "__main__":

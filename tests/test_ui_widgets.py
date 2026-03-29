@@ -52,13 +52,14 @@ class TestTileWidget:
 
     def test_zoom_limits(self, app):
         from bimap.ui.map_canvas.tile_widget import TileWidget
-        from bimap.config import MIN_ZOOM, MAX_ZOOM
+        from bimap.config import MIN_ZOOM, TILE_PROVIDERS, DEFAULT_TILE_PROVIDER
         from bimap.models.project import Project
         w = TileWidget()
         w.set_project(Project())
+        provider_max = TILE_PROVIDERS.get(DEFAULT_TILE_PROVIDER, {}).get("max_zoom", 19)
         for _ in range(30):
             w.zoom_in()
-        assert w.zoom == MAX_ZOOM
+        assert w.zoom == provider_max
         for _ in range(30):
             w.zoom_out()
         assert w.zoom == MIN_ZOOM

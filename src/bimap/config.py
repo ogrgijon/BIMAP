@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass as _dataclass
 from pathlib import Path
 
 # ── Application ──────────────────────────────────────────────────────────────
@@ -23,10 +24,10 @@ for _d in (APP_DATA_DIR, TILE_CACHE_DIR, PROJECTS_DIR):
 # ── Map ───────────────────────────────────────────────────────────────────────
 TILE_SIZE: int = 256
 MIN_ZOOM: int = 1
-MAX_ZOOM: int = 19
+MAX_ZOOM: int = 21
 DEFAULT_ZOOM: int = 12
-DEFAULT_CENTER_LAT: float = 40.4168   # Madrid
-DEFAULT_CENTER_LON: float = -3.7038
+DEFAULT_CENTER_LAT: float = 43.5453   # Gijón, Asturias
+DEFAULT_CENTER_LON: float = -5.6615
 
 # ── Tile Providers ────────────────────────────────────────────────────────────
 TILE_PROVIDERS: dict[str, dict] = {
@@ -81,10 +82,18 @@ DEFAULT_KEYPOINT_SIZE: int = 14
 # ── PDF Export ────────────────────────────────────────────────────────────────
 PDF_DEFAULT_DPI: int = 300
 PDF_PAGE_SIZES: dict[str, tuple[float, float]] = {
-    "A4": (595.27, 841.89),
-    "A3": (841.89, 1190.55),
-    "Letter": (612.0, 792.0),
-    "Legal": (612.0, 1008.0),
+    # (width_pts, height_pts) in portrait at 72 DPI
+    "A4":     (595.27, 841.89),
+    "A3":     (841.89, 1190.55),
+    "Letter": (612.0,  792.0),
+    "Legal":  (612.0,  1008.0),
+}
+PDF_PAGE_SIZES_MM: dict[str, tuple[float, float]] = {
+    # (width_mm, height_mm) in portrait — authoritative for QPdfWriter
+    "A4":     (210.0,  297.0),
+    "A3":     (297.0,  420.0),
+    "Letter": (215.9,  279.4),
+    "Legal":  (215.9,  355.6),
 }
 
 # ── Project file ──────────────────────────────────────────────────────────────
@@ -95,3 +104,82 @@ AUTOSAVE_INTERVAL_MS: int = 60_000   # 1 minute
 
 # ── Undo ─────────────────────────────────────────────────────────────────────
 UNDO_STACK_LIMIT: int = 100
+
+# ── User Preferences ─────────────────────────────────────────────────────────
+
+
+@_dataclass
+class Settings:
+    """Mutable snapshot of all user preferences."""
+    language: str = "en"
+    autosave_interval_ms: int = AUTOSAVE_INTERVAL_MS
+    undo_stack_limit: int = UNDO_STACK_LIMIT
+    startup_mode: str = "none"           # "none" | "last"
+    default_zoom: int = DEFAULT_ZOOM
+    default_lat: float = DEFAULT_CENTER_LAT
+    default_lon: float = DEFAULT_CENTER_LON
+    tile_provider: str = DEFAULT_TILE_PROVIDER
+    show_scale_bar: bool = True
+    show_north_arrow: bool = True
+    grid_scale: float = 1.0          # 0.5=fine, 1.0=normal, 2.0=coarse, 4.0=very coarse
+    tile_cache_max_mb: int = 512
+    tile_cache_expiry_days: int = TILE_CACHE_EXPIRE_DAYS
+    projects_dir: str = ""
+    # Live feed settings
+    live_network_timeout_s: int = 10
+    live_max_markers: int = 5000
+    live_trail_default: int = 0
+    live_follow_fastest: bool = False
+    live_show_error_badge: bool = True
+
+
+def load_user_settings() -> Settings:
+    """Read persisted preferences from QSettings and return a Settings instance."""
+    from PyQt6.QtCore import QSettings as _QS
+    s = _QS(APP_NAME, APP_NAME)
+    return Settings(
+        language=str(s.value("language", "en")),
+        autosave_interval_ms=int(s.value("autosave_interval_ms", AUTOSAVE_INTERVAL_MS)),
+        undo_stack_limit=int(s.value("undo_stack_limit", UNDO_STACK_LIMIT)),
+        startup_mode=str(s.value("startup_mode", "none")),
+        default_zoom=int(s.value("default_zoom", DEFAULT_ZOOM)),
+        default_lat=float(s.value("default_lat", DEFAULT_CENTER_LAT)),
+        default_lon=float(s.value("default_lon", DEFAULT_CENTER_LON)),
+        tile_provider=str(s.value("tile_provider", DEFAULT_TILE_PROVIDER)),
+        show_scale_bar=s.value("show_scale_bar", True, type=bool),
+        show_north_arrow=s.value("show_north_arrow", True, type=bool),
+        grid_scale=float(s.value("grid_scale", 1.0)),
+        tile_cache_max_mb=int(s.value("tile_cache_max_mb", TILE_CACHE_SIZE_BYTES // (1024 * 1024))),
+        tile_cache_expiry_days=int(s.value("tile_cache_expiry_days", TILE_CACHE_EXPIRE_DAYS)),
+        projects_dir=str(s.value("projects_dir", "")),
+        live_network_timeout_s=int(s.value("live_network_timeout_s", 10)),
+        live_max_markers=int(s.value("live_max_markers", 5000)),
+        live_trail_default=int(s.value("live_trail_default", 0)),
+        live_follow_fastest=s.value("live_follow_fastest", False, type=bool),
+        live_show_error_badge=s.value("live_show_error_badge", True, type=bool),
+    )
+
+
+def save_user_settings(settings: Settings) -> None:
+    """Persist a Settings instance to QSettings."""
+    from PyQt6.QtCore import QSettings as _QS
+    s = _QS(APP_NAME, APP_NAME)
+    s.setValue("language", settings.language)
+    s.setValue("autosave_interval_ms", settings.autosave_interval_ms)
+    s.setValue("undo_stack_limit", settings.undo_stack_limit)
+    s.setValue("startup_mode", settings.startup_mode)
+    s.setValue("default_zoom", settings.default_zoom)
+    s.setValue("default_lat", settings.default_lat)
+    s.setValue("default_lon", settings.default_lon)
+    s.setValue("tile_provider", settings.tile_provider)
+    s.setValue("show_scale_bar", settings.show_scale_bar)
+    s.setValue("show_north_arrow", settings.show_north_arrow)
+    s.setValue("grid_scale", settings.grid_scale)
+    s.setValue("tile_cache_max_mb", settings.tile_cache_max_mb)
+    s.setValue("tile_cache_expiry_days", settings.tile_cache_expiry_days)
+    s.setValue("projects_dir", settings.projects_dir)
+    s.setValue("live_network_timeout_s", settings.live_network_timeout_s)
+    s.setValue("live_max_markers", settings.live_max_markers)
+    s.setValue("live_trail_default", settings.live_trail_default)
+    s.setValue("live_follow_fastest", settings.live_follow_fastest)
+    s.setValue("live_show_error_badge", settings.live_show_error_badge)

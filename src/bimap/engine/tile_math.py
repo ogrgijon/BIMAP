@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import NamedTuple
 
-TILE_SIZE = 256
+from bimap.config import TILE_SIZE
 
 
 @dataclass(frozen=True)

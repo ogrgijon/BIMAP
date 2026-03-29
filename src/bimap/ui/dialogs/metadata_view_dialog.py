@@ -15,6 +15,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from bimap.i18n import t
+
 
 class MetadataViewDialog(QDialog):
     """Read-only dialog displaying an element's key-value metadata in a polished layout."""
@@ -53,7 +55,7 @@ class MetadataViewDialog(QDialog):
 
         # ── Content ────────────────────────────────────────────────────────── #
         if not metadata:
-            empty = QLabel("No metadata entries for this element.")
+            empty = QLabel(t("No metadata entries for this element."))
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setStyleSheet("color: #858585; font-style: italic; padding: 20px;")
             root.addWidget(empty)
@@ -63,7 +65,7 @@ class MetadataViewDialog(QDialog):
             root.addWidget(count_label)
 
             table = QTableWidget(len(metadata), 2)
-            table.setHorizontalHeaderLabels(["Key", "Value"])
+            table.setHorizontalHeaderLabels([t("Key"), t("Value")])
             table.horizontalHeader().setSectionResizeMode(
                 0, QHeaderView.ResizeMode.ResizeToContents
             )
@@ -94,7 +96,7 @@ class MetadataViewDialog(QDialog):
             root.addWidget(table)
 
         # ── Close button ───────────────────────────────────────────────────── #
-        btn_close = QPushButton("Close")
+        btn_close = QPushButton(t("Close"))
         btn_close.setDefault(True)
         btn_close.setFixedWidth(100)
         btn_close.clicked.connect(self.accept)

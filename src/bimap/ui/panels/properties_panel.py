@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
-from uuid import UUID
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QDoubleValidator, QFont, QIntValidator
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
-    QColorDialog,
     QComboBox,
-    QDoubleSpinBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
     QFontComboBox,
     QFormLayout,
     QFrame,
@@ -19,69 +21,35 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
-    QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from bimap.i18n import t
 from bimap.models.annotation import Annotation
 from bimap.models.keypoint import Keypoint
-from bimap.models.zone import Zone
+from bimap.models.zone import Zone, ZoneType
+from bimap.ui.widgets import ColorButton
 
 
-class ColorButton(QPushButton):
-    """A color-swatch button that shows the hex value and opens a full color picker."""
-
-    color_changed = pyqtSignal(str)
-
-    def __init__(self, color: str = "#3388FF", parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._color = color
-        self.setFixedHeight(28)
-        self.setMinimumWidth(90)
-        self._update_style()
-        self.clicked.connect(self._pick_color)
-
-    def set_color(self, color: str) -> None:
-        self._color = color
-        self._update_style()
-
-    def color(self) -> str:
-        return self._color
-
-    def _update_style(self) -> None:
-        # Choose a contrasting label colour (dark or light) based on luminance
-        c = QColor(self._color)
-        luminance = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
-        label_color = "#111111" if luminance > 140 else "#FFFFFF"
-        self.setText(self._color.upper())
-        self.setStyleSheet(
-            f"background-color: {self._color};"
-            f"color: {label_color};"
-            "border: 1px solid #666;"
-            "border-radius: 4px;"
-            "font-size: 10px;"
-            "font-family: monospace;"
-            "padding: 0 4px;"
-        )
-
-    def _pick_color(self) -> None:
-        options = QColorDialog.ColorDialogOption.ShowAlphaChannel
-        col = QColorDialog.getColor(
-            QColor(self._color), self, "Choose Color", options=options
-        )
-        if col.isValid():
-            self._color = col.name()   # no alpha in hex; alpha handled separately
-            self._update_style()
-            self.color_changed.emit(self._color)
+def _hav_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Haversine distance in metres between two WGS-84 coordinate pairs."""
+    R = 6_371_000.0
+    φ1 = math.radians(lat1)
+    φ2 = math.radians(lat2)
+    Δφ = math.radians(lat2 - lat1)
+    Δλ = math.radians(lon2 - lon1)
+    a = math.sin(Δφ / 2) ** 2 + math.cos(φ1) * math.cos(φ2) * math.sin(Δλ / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(min(1.0, a)))
 
 
 class PropertiesPanel(QWidget):
@@ -98,12 +66,19 @@ class PropertiesPanel(QWidget):
     preset_applied = pyqtSignal(str, str, str)
     # Emitted when a metadata key-value pair changes: (element_type, element_id, key, value|None)
     metadata_changed = pyqtSignal(str, str, str, object)
+    # Emitted when visibility of a metadata key changes: (element_type, element_id, hidden_keys_list)
+    metadata_hidden_changed = pyqtSignal(str, str, list)
+    # Emitted when a metadata binding changes: (element_type, element_id, key, binding|None)
+    metadata_binding_changed = pyqtSignal(str, str, str, object)
+    # Emitted when the user clicks "Open Form Designer" from the properties panel
+    open_form_designer_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._element: Any = None
         self._etype: str = ""
         self._project: Any = None
+        self._rebuilding: bool = False  # True while form is being torn down/rebuilt
         self._setup_ui()
 
     def set_project(self, project: Any) -> None:
@@ -115,7 +90,7 @@ class PropertiesPanel(QWidget):
         outer.setContentsMargins(4, 6, 4, 4)
         outer.setSpacing(4)
 
-        self._title = QLabel("Properties")
+        self._title = QLabel(t("Properties"))
         self._title.setStyleSheet(
             "font-weight: bold; font-size: 12px;"
             "padding: 3px 4px;"
@@ -172,10 +147,11 @@ class PropertiesPanel(QWidget):
         self._meta_layout.addWidget(_empty)
         self._meta_layout.addStretch()
 
-        self._tabs.addTab(style_tab, "Style")
-        self._tabs.addTab(self._meta_tab, "Metadata")
+        self._tabs.addTab(style_tab, t("Style"))
+        self._tabs.addTab(self._meta_tab, t("Metadata"))
 
     def show_element(self, element: Any, etype: str) -> None:
+        self._rebuilding = True
         self._element = element
         self._etype = etype
         self._clear_form()
@@ -185,32 +161,90 @@ class PropertiesPanel(QWidget):
             self._populate_keypoint(element)
         elif etype == "annotation":
             self._populate_annotation(element)
+        # Always reveal the Style tab so the user sees content immediately
+        self._tabs.setCurrentIndex(0)
+        self._rebuilding = False
+
+    def refresh_current(self) -> None:
+        """Re-render the panel for the currently displayed element (e.g. after undo/redo).
+
+        Always looks up the **fresh** copy of the element from the project so
+        that the panel reflects the actual model state even after undo commands
+        replace the project's zone/keypoint list entries with deep-copies.
+        """
+        if self._element is None:
+            return
+        # Don't rebuild while the user is actively editing a field inside this
+        # panel — a continuous signal (e.g. slider valueChanged) could otherwise
+        # tear down and recreate the form mid-keystroke, resetting the value.
+        focused = QApplication.focusWidget()
+        if focused is not None and self.isAncestorOf(focused):
+            return
+        element = self._element
+        if self._project is not None:
+            element = self._find_in_project(self._etype, self._element.id) or element
+        self.show_element(element, self._etype)
+
+    def _find_in_project(self, etype: str, element_id: object) -> Any:
+        """Return the live project object matching *etype* and *element_id*, or None."""
+        if self._project is None:
+            return None
+        if etype == "zone":
+            return next((z for z in self._project.zones if z.id == element_id), None)
+        if etype == "keypoint":
+            return next((k for k in self._project.keypoints if k.id == element_id), None)
+        if etype == "annotation":
+            return next((a for a in self._project.annotations if a.id == element_id), None)
+        return None
 
     def clear(self) -> None:
         self._element = None
         self._etype = ""
         self._clear_form()
-        self._title.setText("Properties")
+        self._title.setText(t("Properties"))
 
     # ── Form builders ──────────────────────────────────────────────────────────
 
     def _clear_form(self) -> None:
+        # Block signals on all child widgets before removing them so that
+        # QDoubleSpinBox / QLineEdit don't fire editingFinished during teardown
+        # and accidentally overwrite the value the user just committed.
+        for i in range(self._form.rowCount()):
+            for role in (QFormLayout.ItemRole.LabelRole, QFormLayout.ItemRole.FieldRole):
+                item = self._form.itemAt(i, role)
+                if item and item.widget():
+                    item.widget().blockSignals(True)
         while self._form.rowCount() > 0:
             self._form.removeRow(0)
         # Clear metadata tab content
         while self._meta_layout.count() > 0:
             item = self._meta_layout.takeAt(0)
             if item.widget():
+                item.widget().blockSignals(True)
                 item.widget().deleteLater()
 
     def _populate_zone(self, zone: "Zone") -> None:
-        self._title.setText(f"Zone: {zone.name}")
+        # Determine display width/height (may need to compute from coords for new zones)
+        _coords = list(zone.coordinates or [])
+        _w = zone.width_m
+        _h = zone.height_m
+        if zone.zone_type == ZoneType.RECTANGLE and len(_coords) >= 4:
+            if _w == 0:
+                _w = _hav_m(_coords[0].lat, _coords[0].lon, _coords[1].lat, _coords[1].lon)
+            if _h == 0:
+                _h = _hav_m(_coords[1].lat, _coords[1].lon, _coords[2].lat, _coords[2].lon)
+
+        if _w > 0 and _h > 0:
+            dim = f" ({_w:.1f}×{_h:.1f} m)"
+        else:
+            dim = ""
+        self._title.setText(f"{t('Zone')}: {zone.name}{dim}")
 
         # Style presets (only shown if the project has any)
         presets = getattr(self._project, "style_presets", []) if self._project else []
         if presets:
             preset_combo = QComboBox()
-            preset_combo.addItem("— Apply Preset —")
+            preset_combo.addItem(t("— Apply Preset —"))
             for p in presets:
                 preset_combo.addItem(p.name)
             preset_combo.currentIndexChanged.connect(
@@ -220,102 +254,178 @@ class PropertiesPanel(QWidget):
                     else None
                 )
             )
-            self._form.addRow("Preset", preset_combo)
-        name_edit = self._add_line_edit("Name", zone.name)
+            self._form.addRow(t("Preset"), preset_combo)
+        name_edit = self._add_line_edit(t("Name"), zone.name)
         name_edit.editingFinished.connect(
             lambda: self._emit("name", name_edit.text())
         )
-        group_edit = self._add_line_edit("Group", zone.group)
+        group_edit = self._add_line_edit(t("Group"), zone.group)
         group_edit.editingFinished.connect(
             lambda: self._emit("group", group_edit.text())
         )
 
         # Style section
-        bg = QGroupBox("Fill")
+        bg = QGroupBox(t("Fill"))
         bg_layout = QFormLayout(bg)
         fill_btn = ColorButton(zone.style.fill_color)
         fill_btn.color_changed.connect(lambda c: self._emit("style.fill_color", c))
-        bg_layout.addRow("Color", fill_btn)
+        bg_layout.addRow(t("Color"), fill_btn)
 
         alpha_slider = QSlider(Qt.Orientation.Horizontal)
         alpha_slider.setRange(0, 255)
         alpha_slider.setValue(zone.style.fill_alpha)
         alpha_slider.valueChanged.connect(lambda v: self._emit("style.fill_alpha", v))
-        bg_layout.addRow("Opacity", alpha_slider)
+        bg_layout.addRow(t("Opacity"), alpha_slider)
         self._form.addRow(bg)
 
-        border_grp = QGroupBox("Border")
+        border_grp = QGroupBox(t("Border"))
         border_layout = QFormLayout(border_grp)
         border_btn = ColorButton(zone.style.border_color)
         border_btn.color_changed.connect(lambda c: self._emit("style.border_color", c))
-        border_layout.addRow("Color", border_btn)
-        bw_spin = QSpinBox()
-        bw_spin.setRange(0, 20)
-        bw_spin.setValue(zone.style.border_width)
-        bw_spin.valueChanged.connect(lambda v: self._emit("style.border_width", v))
-        border_layout.addRow("Width", bw_spin)
+        border_layout.addRow(t("Color"), border_btn)
+        bw_edit = QLineEdit(str(zone.style.border_width))
+        bw_edit.setValidator(QIntValidator(0, 20, bw_edit))
+        bw_edit.editingFinished.connect(
+            lambda: self._emit("style.border_width", int(bw_edit.text() or "0"))
+        )
+        border_layout.addRow(t("Width"), bw_edit)
         self._form.addRow(border_grp)
 
-        label_grp = QGroupBox("Label")
+        label_grp = QGroupBox(t("Label"))
         label_layout = QFormLayout(label_grp)
-        no_label = not bool(zone.label.text)
         label_grp.setEnabled(True)  # allow text entry even when empty
 
         lbl_edit = QLineEdit(zone.label.text)
         lbl_edit.editingFinished.connect(
             lambda: self._emit("label.text", lbl_edit.text())
         )
-        label_layout.addRow("Text", lbl_edit)
+        label_layout.addRow(t("Text"), lbl_edit)
 
         font_combo = QFontComboBox()
         font_combo.setCurrentFont(QFont(zone.label.style.font_family))
         font_combo.currentFontChanged.connect(
             lambda f: self._emit("label.style.font_family", f.family())
         )
-        label_layout.addRow("Font", font_combo)
+        label_layout.addRow(t("Font"), font_combo)
 
-        fs_spin = QSpinBox()
-        fs_spin.setRange(6, 72)
-        fs_spin.setValue(zone.label.style.font_size)
-        fs_spin.valueChanged.connect(lambda v: self._emit("label.style.font_size", v))
-        label_layout.addRow("Size", fs_spin)
+        fs_edit = QLineEdit(str(zone.label.style.font_size))
+        fs_edit.setValidator(QIntValidator(6, 72, fs_edit))
+        fs_edit.editingFinished.connect(
+            lambda: self._emit("label.style.font_size", int(fs_edit.text() or "12"))
+        )
+        label_layout.addRow(t("Size"), fs_edit)
 
         style_row_widget = QWidget()
         style_row = QHBoxLayout(style_row_widget)
         style_row.setContentsMargins(0, 0, 0, 0)
-        bold_cb = QCheckBox("Bold")
+        bold_cb = QCheckBox(t("Bold"))
         bold_cb.setChecked(zone.label.style.bold)
         bold_cb.toggled.connect(lambda v: self._emit("label.style.bold", v))
-        italic_cb = QCheckBox("Italic")
+        italic_cb = QCheckBox(t("Italic"))
         italic_cb.setChecked(zone.label.style.italic)
         italic_cb.toggled.connect(lambda v: self._emit("label.style.italic", v))
         style_row.addWidget(bold_cb)
         style_row.addWidget(italic_cb)
-        label_layout.addRow("Style", style_row_widget)
+        label_layout.addRow(t("Style"), style_row_widget)
 
         txt_color_btn = ColorButton(zone.label.style.color)
         txt_color_btn.color_changed.connect(lambda c: self._emit("label.style.color", c))
-        label_layout.addRow("Color", txt_color_btn)
+        label_layout.addRow(t("Color"), txt_color_btn)
 
         bg_color_btn = ColorButton(zone.label.style.background_color or "#FFFFFF")
         bg_color_btn.color_changed.connect(
             lambda c: self._emit("label.style.background_color", c)
         )
-        label_layout.addRow("Bg Color", bg_color_btn)
+        label_layout.addRow(t("Bg Color"), bg_color_btn)
 
-        ox_spin = QDoubleSpinBox()
-        ox_spin.setRange(-200.0, 200.0)
-        ox_spin.setValue(zone.label.offset_x)
-        ox_spin.valueChanged.connect(lambda v: self._emit("label.offset_x", v))
-        label_layout.addRow("Offset X", ox_spin)
+        ox_edit = QLineEdit(str(zone.label.offset_x))
+        ox_edit.setValidator(QDoubleValidator(-200.0, 200.0, 1, ox_edit))
+        ox_edit.editingFinished.connect(
+            lambda: self._emit("label.offset_x", float((ox_edit.text() or "0").replace(",", ".")))
+        )
+        label_layout.addRow(t("Offset X"), ox_edit)
 
-        oy_spin = QDoubleSpinBox()
-        oy_spin.setRange(-200.0, 200.0)
-        oy_spin.setValue(zone.label.offset_y)
-        oy_spin.valueChanged.connect(lambda v: self._emit("label.offset_y", v))
-        label_layout.addRow("Offset Y", oy_spin)
+        oy_edit = QLineEdit(str(zone.label.offset_y))
+        oy_edit.setValidator(QDoubleValidator(-200.0, 200.0, 1, oy_edit))
+        oy_edit.editingFinished.connect(
+            lambda: self._emit("label.offset_y", float((oy_edit.text() or "0").replace(",", ".")))
+        )
+        label_layout.addRow(t("Offset Y"), oy_edit)
 
         self._form.addRow(label_grp)
+
+        # ── Geometry (metre-based sizing) ────────────────────────────────── #
+        geo_grp = QGroupBox(t("Geometry"))
+        geo_layout = QFormLayout(geo_grp)
+        if zone.zone_type == ZoneType.CIRCLE:
+            r_edit = QLineEdit(f"{zone.radius_m:.1f}")
+            r_edit.setValidator(QDoubleValidator(1.0, 500_000.0, 1, r_edit))
+            r_edit.editingFinished.connect(
+                lambda: self._emit("radius_m", float((r_edit.text() or "1").replace(",", ".")))
+            )
+            geo_layout.addRow(t("Radius (m)"), r_edit)
+        elif zone.zone_type == ZoneType.RECTANGLE:
+            w_edit = QLineEdit(f"{max(_w, 1.0):.1f}")
+            w_edit.setValidator(QDoubleValidator(1.0, 500_000.0, 1, w_edit))
+            w_edit.editingFinished.connect(
+                lambda: self._emit("width_m", float((w_edit.text() or "1").replace(",", ".")))
+            )
+            geo_layout.addRow(t("Width (m)"), w_edit)
+
+            h_edit = QLineEdit(f"{max(_h, 1.0):.1f}")
+            h_edit.setValidator(QDoubleValidator(1.0, 500_000.0, 1, h_edit))
+            h_edit.editingFinished.connect(
+                lambda: self._emit("height_m", float((h_edit.text() or "1").replace(",", ".")))
+            )
+            geo_layout.addRow(t("Height (m)"), h_edit)
+        # Rotation (all non-circle zone types)
+        if zone.zone_type != ZoneType.CIRCLE:
+            rot_edit = QLineEdit(f"{zone.rotation_deg:.1f}")
+            rot_edit.setValidator(QDoubleValidator(-360.0, 360.0, 1, rot_edit))
+            rot_edit.editingFinished.connect(
+                lambda: self._emit("rotation_deg", float((rot_edit.text() or "0").replace(",", ".")))
+            )
+            geo_layout.addRow(t("Rotation (°)"), rot_edit)
+        self._form.addRow(geo_grp)
+
+        # ── SVG Fill ─────────────────────────────────────────────────────── #
+        svg_grp = QGroupBox(t("SVG Fill"))
+        svg_layout = QFormLayout(svg_grp)
+
+        svg_label = QLabel(zone.svg_fill_url or t("No file selected"))
+        svg_label.setWordWrap(True)
+        svg_label.setStyleSheet("color: #858585; font-size: 11px;")
+
+        def _browse_svg() -> None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, t("SVG Fill"), "", "SVG Files (*.svg);;All Files (*)"
+            )
+            if path:
+                svg_label.setText(path)
+                self._emit("svg_fill_url", path)
+
+        def _clear_svg() -> None:
+            svg_label.setText(t("No file selected"))
+            self._emit("svg_fill_url", "")
+
+        btn_row_widget = QWidget()
+        btn_row_layout = QHBoxLayout(btn_row_widget)
+        btn_row_layout.setContentsMargins(0, 0, 0, 0)
+        browse_btn = QPushButton(t("Browse\u2026"))
+        browse_btn.clicked.connect(_browse_svg)
+        clear_btn = QPushButton(t("Clear"))
+        clear_btn.clicked.connect(_clear_svg)
+        btn_row_layout.addWidget(browse_btn)
+        btn_row_layout.addWidget(clear_btn)
+        btn_row_layout.addStretch()
+
+        svg_layout.addRow(svg_label)
+        svg_layout.addRow(btn_row_widget)
+        self._form.addRow(svg_grp)
+
+        # ── Linked Form Design ─────────────────────────────────────────────── #
+        self._add_form_design_picker(zone, "zone")
+
         self._setup_metadata_tab(zone.metadata, zone)
 
     def _setup_metadata_tab(self, metadata: dict, element: Any) -> None:
@@ -326,15 +436,34 @@ class PropertiesPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        table = QTableWidget(0, 2)
-        table.setHorizontalHeaderLabels(["Key", "Value"])
-        table.horizontalHeader().setStretchLastSection(True)
+        hidden: list = list(getattr(element, "metadata_hidden", []))
+        bindings: dict = dict(getattr(element, "metadata_bindings", {}))
+
+        # 4 columns: Key | Value | 👁 | Source
+        table = QTableWidget(0, 4)
+        table.setHorizontalHeaderLabels([t("Key"), t("Value"), "👁", t("Source")])
+        hdr = table.horizontalHeader()
+        hdr.setStretchLastSection(False)
+        hdr.resizeSection(0, 120)
+        hdr.resizeSection(1, 120)
+        hdr.resizeSection(2, 28)
+        hdr.setSectionResizeMode(1, hdr.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(3, hdr.ResizeMode.ResizeToContents)
         table.setAlternatingRowColors(True)
-        from PyQt6.QtWidgets import QSizePolicy
-        table.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
-        )
+        table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        table.setToolTip(t("Double-click Source column to bind a key to a data source"))
+
+        def _source_label(key: str) -> str:
+            b = bindings.get(key)
+            if not b:
+                return "—"
+            sid = getattr(b, "source_id", "")
+            col = getattr(b, "column", "")
+            if self._project:
+                for ds in getattr(self._project, "data_sources", []):
+                    if str(ds.id) == sid:
+                        return f"{ds.name} › {col}"
+            return f"{sid[:8]}… › {col}"
 
         def _load() -> None:
             table.blockSignals(True)
@@ -342,30 +471,195 @@ class PropertiesPanel(QWidget):
             for k, v in metadata.items():
                 row = table.rowCount()
                 table.insertRow(row)
+                # Col 0 – Key
                 table.setItem(row, 0, QTableWidgetItem(k))
+                # Col 1 – Value
                 table.setItem(row, 1, QTableWidgetItem(v))
+                # Col 2 – 👁 visible checkbox
+                vis_item = QTableWidgetItem()
+                vis_item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsSelectable
+                )
+                vis_item.setCheckState(
+                    Qt.CheckState.Unchecked if k in hidden else Qt.CheckState.Checked
+                )
+                table.setItem(row, 2, vis_item)
+                # Col 3 – Source binding (display only; double-click to edit)
+                src_item = QTableWidgetItem(_source_label(k))
+                src_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                src_item.setForeground(
+                    table.palette().color(table.palette().ColorRole.Highlight)
+                    if bindings.get(k) else table.palette().color(table.palette().ColorRole.PlaceholderText)
+                )
+                table.setItem(row, 3, src_item)
             table.blockSignals(False)
 
         _load()
 
         def _on_cell_changed(r: int, c: int) -> None:
             k_item = table.item(r, 0)
-            v_item = table.item(r, 1)
             if k_item is None:
                 return
             key = k_item.text().strip()
-            val = v_item.text() if v_item else ""
-            if key:
+            if not key:
+                return
+            if c in (0, 1):
+                v_item = table.item(r, 1)
+                val = v_item.text() if v_item else ""
                 self.metadata_changed.emit(self._etype, str(element.id), key, val)
+            elif c == 2:
+                vis_item = table.item(r, 2)
+                if vis_item is None:
+                    return
+                is_hidden = vis_item.checkState() == Qt.CheckState.Unchecked
+                if is_hidden and key not in hidden:
+                    hidden.append(key)
+                elif not is_hidden and key in hidden:
+                    hidden.remove(key)
+                self.metadata_hidden_changed.emit(self._etype, str(element.id), list(hidden))
 
         table.cellChanged.connect(_on_cell_changed)
+
+        def _on_cell_double_clicked(r: int, c: int) -> None:
+            if c != 3:
+                return
+            k_item = table.item(r, 0)
+            if k_item is None:
+                return
+            key = k_item.text().strip()
+            if not key:
+                return
+            _open_binding_dialog(key, r)
+
+        def _open_binding_dialog(key: str, row: int) -> None:
+            sources = getattr(self._project, "data_sources", []) if self._project else []
+            dlg = QDialog(self)
+            dlg.setWindowTitle(t("Bind Metadata Key") + f" — {key}")
+            dlg.resize(400, 280)
+            main_v = QVBoxLayout(dlg)
+            form = QFormLayout()
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+            # Data source combo
+            _NEW_DS_SENTINEL = "__new__"
+            src_combo = QComboBox()
+            src_combo.addItem(t("— none —"), "")
+            for ds in sources:
+                src_combo.addItem(ds.name, str(ds.id))
+            src_combo.addItem(t("➕ New Data Source…"), _NEW_DS_SENTINEL)
+            cur_binding = bindings.get(key)
+            cur_sid = getattr(cur_binding, "source_id", "") if cur_binding else ""
+            idx = src_combo.findData(cur_sid)
+            src_combo.setCurrentIndex(max(0, idx))
+
+            def _on_src_combo_changed(index: int, _combo=src_combo) -> None:
+                if _combo.itemData(index) != _NEW_DS_SENTINEL:
+                    return
+                # Open new data source wizard; if accepted, add to project and select it
+                try:
+                    from bimap.ui.dialogs.data_source_dialog import DataSourceDialog
+                    from bimap.data.base import build_connector
+                    from bimap.engine.commands import AddDataSourceCommand
+                except ImportError:
+                    _combo.setCurrentIndex(0)
+                    return
+                new_dlg = DataSourceDialog(parent=dlg)
+                if new_dlg.exec():
+                    new_ds = new_dlg.source
+                    try:
+                        connector = build_connector(new_ds)
+                        connector.connect()
+                    except Exception:
+                        connector = None
+                    if self._project is not None:
+                        self._project.data_sources.append(new_ds)
+                    _combo.insertItem(_combo.count() - 1, new_ds.name, str(new_ds.id))
+                    _combo.setCurrentIndex(_combo.count() - 2)
+                else:
+                    _combo.setCurrentIndex(0)
+
+            src_combo.currentIndexChanged.connect(_on_src_combo_changed)
+            form.addRow(t("Data Source"), src_combo)
+
+            col_edit = QLineEdit()
+            col_edit.setPlaceholderText("e.g. temperature")
+            col_edit.setText(getattr(cur_binding, "column", "") if cur_binding else "")
+            form.addRow(t("Column"), col_edit)
+
+            match_field_edit = QLineEdit()
+            match_field_edit.setPlaceholderText(t("(optional) e.g. zone_name"))
+            match_field_edit.setText(getattr(cur_binding, "match_field", "") if cur_binding else "")
+            form.addRow(t("Filter Field"), match_field_edit)
+
+            match_val_edit = QLineEdit()
+            match_val_edit.setPlaceholderText("{{element.name}}")
+            match_val_edit.setText(
+                getattr(cur_binding, "match_value", "{{element.name}}") if cur_binding
+                else "{{element.name}}"
+            )
+            form.addRow(t("Filter Value"), match_val_edit)
+
+            agg_combo = QComboBox()
+            for agg in ("first", "last", "sum", "avg", "count"):
+                agg_combo.addItem(agg)
+            agg_combo.setCurrentText(getattr(cur_binding, "aggregate", "first") if cur_binding else "first")
+            form.addRow(t("Aggregate"), agg_combo)
+
+            main_v.addLayout(form)
+            main_v.addWidget(QLabel(
+                "<small>" + t("Use {{element.name}} or {{element.id}} as dynamic filter values.") + "</small>"
+            ))
+
+            btn_box = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            btn_clear = QPushButton(t("Clear Binding"))
+            btn_box.addButton(btn_clear, QDialogButtonBox.ButtonRole.ResetRole)
+            btn_box.accepted.connect(dlg.accept)
+            btn_box.rejected.connect(dlg.reject)
+            btn_clear.clicked.connect(lambda: (dlg.done(2)))
+            main_v.addWidget(btn_box)
+
+            result = dlg.exec()
+            if result == 2:
+                # Clear binding
+                bindings.pop(key, None)
+                self.metadata_binding_changed.emit(self._etype, str(element.id), key, None)
+                # Update source cell
+                src_item = table.item(row, 3)
+                if src_item:
+                    src_item.setText("—")
+                    src_item.setForeground(table.palette().color(table.palette().ColorRole.PlaceholderText))
+            elif result == 1:  # Accepted
+                sid = src_combo.currentData()
+                col = col_edit.text().strip()
+                # Guard: sentinel value means no real source was selected
+                if sid and col and sid != "__new__":
+                    from bimap.models.zone import MetadataKeyBinding
+                    b = MetadataKeyBinding(
+                        source_id=sid,
+                        column=col,
+                        match_field=match_field_edit.text().strip(),
+                        match_value=match_val_edit.text().strip() or "{{element.name}}",
+                        aggregate=agg_combo.currentText(),
+                    )
+                    bindings[key] = b
+                    self.metadata_binding_changed.emit(self._etype, str(element.id), key, b)
+                    src_item = table.item(row, 3)
+                    if src_item:
+                        src_item.setText(_source_label(key))
+                        src_item.setForeground(table.palette().color(table.palette().ColorRole.Highlight))
+
+        table.cellDoubleClicked.connect(_on_cell_double_clicked)
         self._meta_layout.addWidget(table)
 
         # ── Add row ──────────────────────────────────────────────────────── #
         btn_row = QHBoxLayout()
         key_combo = QComboBox()
         key_combo.setEditable(True)
-        key_combo.setPlaceholderText("Key")
+        key_combo.setPlaceholderText(t("Key"))
         key_combo.setMinimumWidth(100)
         layer_name = getattr(element, "layer", "Default")
         if self._project:
@@ -376,8 +670,8 @@ class PropertiesPanel(QWidget):
                             key_combo.addItem(k)
                     break
         val_edit = QLineEdit()
-        val_edit.setPlaceholderText("Value")
-        btn_add = QPushButton("+ Add")
+        val_edit.setPlaceholderText(t("Value"))
+        btn_add = QPushButton(t("+ Add"))
 
         def _add_row() -> None:
             key = key_combo.currentText().strip()
@@ -396,93 +690,340 @@ class PropertiesPanel(QWidget):
         btn_row.addWidget(btn_add)
         self._meta_layout.addLayout(btn_row)
 
-        btn_rm = QPushButton("Remove Selected")
+        btn_rm = QPushButton(t("Remove Selected"))
 
         def _remove_row() -> None:
             rows = {i.row() for i in table.selectedItems()}
             for r in sorted(rows, reverse=True):
                 k_item = table.item(r, 0)
                 if k_item:
-                    self.metadata_changed.emit(
-                        self._etype, str(element.id), k_item.text(), None
-                    )
-                    metadata.pop(k_item.text(), None)
+                    key = k_item.text()
+                    self.metadata_changed.emit(self._etype, str(element.id), key, None)
+                    metadata.pop(key, None)
+                    hidden[:] = [h for h in hidden if h != key]
+                    bindings.pop(key, None)
                 table.removeRow(r)
 
         btn_rm.clicked.connect(_remove_row)
         self._meta_layout.addWidget(btn_rm)
 
-    def _populate_keypoint(self, kp: "Keypoint") -> None:
-        self._title.setText("Keypoint")
+        # ── Extension controls (zone / keypoint only) ─────────────────────── #
+        if hasattr(element, "extension_html"):
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("color: #3C3C3C; margin-top: 4px;")
+            self._meta_layout.addWidget(sep)
 
-        title_edit = self._add_line_edit("Title", kp.info_card.title)
+            html = getattr(element, "extension_html", "")
+            etype = self._etype
+
+            ext_row = QHBoxLayout()
+            btn_set_ext = QPushButton(
+                t("Edit Extension\u2026") if html else t("Set Extension\u2026")
+            )
+
+            def _open_extension_picker(_checked=False, _el=element, _et=etype) -> None:
+                library = getattr(self._project, "extension_library", []) if self._project else []
+                if library:
+                    dlg = QDialog(self)
+                    dlg.setWindowTitle(t("Set Extension"))
+                    dlg.resize(380, 300)
+                    lv = QVBoxLayout(dlg)
+                    lv.addWidget(QLabel(t("Select from library or choose Custom:")))
+                    lst = QListWidget()
+                    lst.addItem(t("\u270f\u2002Custom (open editor)"))
+                    for tpl in library:
+                        lst.addItem(tpl.name)
+                    lst.setCurrentRow(0)
+                    lv.addWidget(lst)
+                    btns = QDialogButtonBox(
+                        QDialogButtonBox.StandardButton.Ok
+                        | QDialogButtonBox.StandardButton.Cancel
+                    )
+                    btns.accepted.connect(dlg.accept)
+                    btns.rejected.connect(dlg.reject)
+                    lv.addWidget(btns)
+                    if dlg.exec() and lst.currentRow() >= 0:
+                        row = lst.currentRow()
+                        if row == 0:
+                            from bimap.ui.dialogs.extension_editor_dialog import ExtensionEditorDialog
+                            editor = ExtensionEditorDialog(_el, _et, self)
+                            if editor.exec():
+                                self._emit("extension_html", editor.html_result)
+                                try:
+                                    _el.extension_html = editor.html_result
+                                except Exception:
+                                    pass
+                                self._setup_metadata_tab(_el.metadata, _el)
+                        else:
+                            tpl = library[row - 1]
+                            self._emit("extension_html", tpl.html)
+                            try:
+                                _el.extension_html = tpl.html
+                            except Exception:
+                                pass
+                            self._setup_metadata_tab(_el.metadata, _el)
+                else:
+                    from bimap.ui.dialogs.extension_editor_dialog import ExtensionEditorDialog
+                    editor = ExtensionEditorDialog(_el, _et, self)
+                    if editor.exec():
+                        self._emit("extension_html", editor.html_result)
+                        try:
+                            _el.extension_html = editor.html_result
+                        except Exception:
+                            pass
+                        self._setup_metadata_tab(_el.metadata, _el)
+
+            btn_set_ext.clicked.connect(_open_extension_picker)
+            ext_row.addWidget(btn_set_ext)
+
+            if html:
+                btn_view = QPushButton(t("Open Viewer"))
+
+                def _open_viewer(_checked=False, _el=element, _et=etype) -> None:
+                    from bimap.ui.dialogs.extension_viewer_dialog import ExtensionViewerDialog
+                    dlg = ExtensionViewerDialog(_el, _et, self)
+                    dlg.show()
+
+                btn_view.clicked.connect(_open_viewer)
+                ext_row.addWidget(btn_view)
+
+            ext_row.addStretch()
+            self._meta_layout.addLayout(ext_row)
+
+        # ── Fill Form controls (zone / keypoint) ───────────────────────── #
+        if self._project and hasattr(self._project, "form_designs"):
+            etype = self._etype
+            applicable = [
+                f for f in self._project.form_designs
+                if f.target in ("both", etype)
+            ]
+            if applicable:
+                sep2 = QFrame()
+                sep2.setFrameShape(QFrame.Shape.HLine)
+                sep2.setStyleSheet("color: #3C3C3C; margin-top: 4px;")
+                self._meta_layout.addWidget(sep2)
+
+                forms_row = QHBoxLayout()
+                form_combo = QComboBox()
+                for fd in applicable:
+                    form_combo.addItem(fd.name, str(fd.id))
+                forms_row.addWidget(form_combo, 1)
+
+                btn_fill = QPushButton(t("Fill Form\u2026"))
+
+                def _fill_form(_checked=False, _el=element, _et=etype) -> None:
+                    idx = form_combo.currentIndex()
+                    if idx < 0:
+                        return
+                    chosen_id = form_combo.itemData(idx)
+                    chosen = next(
+                        (fd for fd in applicable if str(fd.id) == chosen_id), None
+                    )
+                    if chosen is None:
+                        return
+                    from bimap.ui.dialogs.form_fill_dialog import FormFillDialog
+
+                    def _live_update(el: Any, key: str, val: str) -> None:
+                        self.metadata_changed.emit(self._etype, str(el.id), key, val)
+                        # Refresh the metadata table in real time while the dialog is open
+                        self._setup_metadata_tab(el.metadata, el)
+
+                    dlg = FormFillDialog(chosen, _el, _et, self, on_change=_live_update)
+                    if dlg.exec():
+                        # Re-render metadata tab to show filled values
+                        self._setup_metadata_tab(_el.metadata, _el)
+                        if self._project:
+                            self._project.mark_modified()
+
+                btn_fill.clicked.connect(_fill_form)
+                forms_row.addWidget(btn_fill)
+                self._meta_layout.addLayout(forms_row)
+
+    def _populate_keypoint(self, kp: "Keypoint") -> None:
+        self._title.setText(t("Keypoint"))
+
+        title_edit = self._add_line_edit(t("Title"), kp.info_card.title)
         title_edit.editingFinished.connect(
             lambda: self._emit("info_card.title", title_edit.text())
         )
-        sub_edit = self._add_line_edit("Subtitle", kp.info_card.subtitle)
+        sub_edit = self._add_line_edit(t("Subtitle"), kp.info_card.subtitle)
         sub_edit.editingFinished.connect(
             lambda: self._emit("info_card.subtitle", sub_edit.text())
         )
         notes = QTextEdit(kp.info_card.notes)
         notes.setMaximumHeight(80)
         notes.textChanged.connect(lambda: self._emit("info_card.notes", notes.toPlainText()))
-        self._form.addRow("Notes", notes)
-        url_edit = self._add_line_edit("URL", kp.info_card.link_url)
+        self._form.addRow(t("Notes"), notes)
+        url_edit = self._add_line_edit(t("URL"), kp.info_card.link_url)
         url_edit.editingFinished.connect(
             lambda: self._emit("info_card.link_url", url_edit.text())
         )
 
         color_btn = ColorButton(kp.icon_color)
         color_btn.color_changed.connect(lambda c: self._emit("icon_color", c))
-        self._form.addRow("Pin Color", color_btn)
+        self._form.addRow(t("Pin Color"), color_btn)
 
-        size_spin = QSpinBox()
-        size_spin.setRange(8, 40)
-        size_spin.setValue(kp.icon_size)
-        size_spin.valueChanged.connect(lambda v: self._emit("icon_size", v))
-        self._form.addRow("Pin Size", size_spin)
+        size_edit = QLineEdit(str(kp.icon_size))
+        size_edit.setValidator(QIntValidator(8, 40, size_edit))
+        size_edit.editingFinished.connect(
+            lambda: self._emit("icon_size", int(size_edit.text() or "16"))
+        )
+        self._form.addRow(t("Pin Size"), size_edit)
 
-        lat_spin = QDoubleSpinBox()
-        lat_spin.setDecimals(6)
-        lat_spin.setRange(-90, 90)
-        lat_spin.setValue(kp.lat)
-        lat_spin.valueChanged.connect(lambda v: self._emit("lat", v))
-        self._form.addRow("Latitude", lat_spin)
+        # ── Icon picker ─────────────────────────────────────────────────── #
+        icon_row = QHBoxLayout()
+        icon_combo = QComboBox()
+        _builtin_icons = [("pin", t("Pin")), ("circle", t("Circle")),
+                          ("square", t("Square")), ("diamond", t("Diamond")),
+                          ("star", t("Star"))]
+        for val, label in _builtin_icons:
+            icon_combo.addItem(label, val)
+        current_icon = getattr(kp, "icon", "pin")
+        idx = next((i for i, (v, _) in enumerate(_builtin_icons) if v == current_icon), -1)
+        if idx >= 0:
+            icon_combo.setCurrentIndex(idx)
+        else:
+            icon_combo.addItem(t("Custom…"), current_icon)
+            icon_combo.setCurrentIndex(icon_combo.count() - 1)
+        icon_combo.currentIndexChanged.connect(
+            lambda _: self._emit("icon", icon_combo.currentData())
+        )
+        icon_row.addWidget(icon_combo, 1)
 
-        lon_spin = QDoubleSpinBox()
-        lon_spin.setDecimals(6)
-        lon_spin.setRange(-180, 180)
-        lon_spin.setValue(kp.lon)
-        lon_spin.valueChanged.connect(lambda v: self._emit("lon", v))
-        self._form.addRow("Longitude", lon_spin)
+        btn_icon_browse = QPushButton(t("Browse…"))
+
+        def _browse_icon() -> None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, t("Choose Icon"), "",
+                "Image files (*.svg *.png *.jpg *.jpeg *.bmp *.ico)"
+            )
+            if path:
+                # Remove old custom entry if present
+                for i in range(icon_combo.count()):
+                    if icon_combo.itemData(i) not in ("pin", "circle", "square", "diamond", "star"):
+                        icon_combo.removeItem(i)
+                        break
+                icon_combo.addItem(t("Custom…"), path)
+                icon_combo.setCurrentIndex(icon_combo.count() - 1)
+                self._emit("icon", path)
+
+        btn_icon_browse.clicked.connect(_browse_icon)
+        icon_row.addWidget(btn_icon_browse)
+        self._form.addRow(t("Icon"), icon_row)
+
+        lat_edit = QLineEdit(f"{kp.lat:.6f}")
+        lat_edit.setValidator(QDoubleValidator(-90.0, 90.0, 6, lat_edit))
+        lat_edit.editingFinished.connect(
+            lambda: self._emit("lat", float((lat_edit.text() or "0").replace(",", ".")))
+        )
+        self._form.addRow(t("Latitude"), lat_edit)
+
+        lon_edit = QLineEdit(f"{kp.lon:.6f}")
+        lon_edit.setValidator(QDoubleValidator(-180.0, 180.0, 6, lon_edit))
+        lon_edit.editingFinished.connect(
+            lambda: self._emit("lon", float((lon_edit.text() or "0").replace(",", ".")))
+        )
+        self._form.addRow(t("Longitude"), lon_edit)
+
+        # ── Linked Form Design ─────────────────────────────────────────────── #
+        self._add_form_design_picker(kp, "keypoint")
 
         self._setup_metadata_tab(kp.metadata, kp)
 
     def _populate_annotation(self, ann: "Annotation") -> None:
-        self._title.setText("Annotation")
+        self._title.setText(t("Annotation"))
         content = QTextEdit(ann.content)
         content.setMinimumHeight(60)
         content.textChanged.connect(lambda: self._emit("content", content.toPlainText()))
-        self._form.addRow("Text", content)
+        self._form.addRow(t("Text"), content)
 
-        fs_spin = QSpinBox()
-        fs_spin.setRange(6, 72)
-        fs_spin.setValue(ann.style.font_size)
-        fs_spin.valueChanged.connect(lambda v: self._emit("style.font_size", v))
-        self._form.addRow("Font Size", fs_spin)
+        fs_edit = QLineEdit(str(ann.style.font_size))
+        fs_edit.setValidator(QIntValidator(6, 72, fs_edit))
+        fs_edit.editingFinished.connect(
+            lambda: self._emit("style.font_size", int(fs_edit.text() or "12"))
+        )
+        self._form.addRow(t("Font Size"), fs_edit)
 
         color_btn = ColorButton(ann.style.color)
         color_btn.color_changed.connect(lambda c: self._emit("style.color", c))
-        self._form.addRow("Text Color", color_btn)
+        self._form.addRow(t("Text Color"), color_btn)
 
         bg_btn = ColorButton(ann.style.background_color)
         bg_btn.color_changed.connect(lambda c: self._emit("style.background_color", c))
-        self._form.addRow("Background", bg_btn)
+        self._form.addRow(t("Background"), bg_btn)
 
         if hasattr(ann, "metadata"):
             self._setup_metadata_tab(ann.metadata, ann)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
+
+    def _add_form_design_picker(self, element: Any, etype: str) -> None:
+        """Add a Form Design combo selector and Fill button to the Style tab."""
+        # Collect ALL forms available in the project (not filtered by etype)
+        all_forms: list = []
+        if self._project and hasattr(self._project, "form_designs"):
+            all_forms = list(self._project.form_designs)
+
+        # If no forms exist, skip this section entirely — user opens Form Designer via Data menu
+        if not all_forms:
+            return
+
+        form_grp = QGroupBox(t("Form"))
+        form_layout = QFormLayout(form_grp)
+
+        form_combo = QComboBox()
+        form_combo.addItem(t("--- none ---"), "")
+        for fd in all_forms:
+            form_combo.addItem(fd.name, str(fd.id))
+        current_fid = getattr(element, "form_design_id", "")
+        cur_idx = form_combo.findData(current_fid)
+        form_combo.setCurrentIndex(max(0, cur_idx))
+
+        def _on_form_selected(idx: int, _el=element, _et=etype) -> None:
+            fid = form_combo.itemData(idx) or ""
+            self._emit("form_design_id", fid)
+            if fid:
+                chosen = next((fd for fd in all_forms if str(fd.id) == fid), None)
+                if chosen:
+                    meta = getattr(_el, "metadata", None)
+                    if meta is not None:
+                        for field in chosen.fields:
+                            if field.label not in meta:
+                                meta[field.label] = field.default_value
+                        self._setup_metadata_tab(meta, _el)
+                    if self._project:
+                        self._project.mark_modified()
+
+        form_combo.currentIndexChanged.connect(_on_form_selected)
+        form_layout.addRow(t("Design"), form_combo)
+
+        # Fill Form button (opens form-fill dialog)
+        btn_fill = QPushButton(t("Fill Form..."))
+
+        def _fill(_checked=False, _el=element, _et=etype) -> None:
+            idx = form_combo.currentIndex()
+            fid = form_combo.itemData(idx) if idx >= 0 else ""
+            if not fid:
+                return
+            chosen = next((fd for fd in all_forms if str(fd.id) == fid), None)
+            if not chosen:
+                return
+            from bimap.ui.dialogs.form_fill_dialog import FormFillDialog
+
+            def _live_update(el: Any, key: str, val: str) -> None:
+                self.metadata_changed.emit(self._etype, str(el.id), key, val)
+                self._setup_metadata_tab(el.metadata, el)
+
+            dlg = FormFillDialog(chosen, _el, _et, self, on_change=_live_update)
+            if dlg.exec():
+                self._setup_metadata_tab(_el.metadata, _el)
+                if self._project:
+                    self._project.mark_modified()
+
+        btn_fill.clicked.connect(_fill)
+        form_layout.addRow(btn_fill)
+        self._form.addRow(form_grp)
 
     def _add_line_edit(self, label: str, value: str) -> QLineEdit:
         edit = QLineEdit(value)

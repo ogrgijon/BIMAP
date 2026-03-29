@@ -22,7 +22,7 @@ class ViewportBookmark(BaseModel):
 class MapState(BaseModel):
     center_lat: float = DEFAULT_CENTER_LAT
     center_lon: float = DEFAULT_CENTER_LON
-    zoom: int = Field(default=DEFAULT_ZOOM, ge=1, le=19)
+    zoom: int = Field(default=DEFAULT_ZOOM, ge=1, le=21)
     rotation: float = 0.0
     tile_provider: str = DEFAULT_TILE_PROVIDER
     bookmarks: list[ViewportBookmark] = Field(default_factory=list)

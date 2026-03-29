@@ -16,6 +16,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from bimap.i18n import t
+
 
 class KeynotesPanel(QWidget):
     """
@@ -42,7 +44,7 @@ class KeynotesPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 4, 2, 4)
 
-        title = QLabel("Keynotes")
+        title = QLabel(t("Keynotes"))
         title.setStyleSheet("font-weight: bold; padding: 2px;")
         layout.addWidget(title)
 

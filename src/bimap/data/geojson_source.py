@@ -55,3 +55,4 @@ class GeoJsonSource(DataSourceBase):
 
     def disconnect(self) -> None:
         self._rows = []
+        self._columns = []

@@ -6,6 +6,8 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup
 from PyQt6.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QSizePolicy,
@@ -15,28 +17,29 @@ from PyQt6.QtWidgets import (
 )
 
 from bimap.config import TILE_PROVIDERS
+from bimap.i18n import t
 from bimap.ui.map_canvas.interaction import ToolMode
 
 # ── Stylesheets ──────────────────────────────────────────────────────────────
 
 _TOOLBAR_QSS = """
 QToolBar {
-    background: #252526;
+    background: #3A3A3C;
     border: none;
-    border-bottom: 1px solid #3C3C3C;
+    border-bottom: 1px solid #505050;
     spacing: 2px;
     padding: 2px 6px;
 }
 QToolBar::separator {
     width: 1px;
-    background: #3C3C3C;
+    background: #505050;
     margin: 4px 3px;
 }
 QToolButton {
     background: transparent;
     border: none;
     border-bottom: 3px solid transparent;
-    color: #858585;
+    color: #C8C8C8;
     font-size: 18px;
     min-width: 36px;
     max-width: 36px;
@@ -47,13 +50,13 @@ QToolButton {
     text-align: center;
 }
 QToolButton:hover {
-    color: #CCCCCC;
-    background: #2A2D2E;
+    color: #FFFFFF;
+    background: #4A4A4E;
 }
 QToolButton:checked {
     color: #FFFFFF;
     border-bottom: 3px solid #007ACC;
-    background: rgba(0, 122, 204, 0.12);
+    background: rgba(0, 122, 204, 0.20);
 }
 QToolButton:pressed {
     background: #094771;
@@ -113,7 +116,7 @@ class SearchBar(QToolBar):
 
         # ── Geocoder ──────────────────────────────────────────────────────── #
         self._search_edit = QLineEdit()
-        self._search_edit.setPlaceholderText("🔍  Search location…")
+        self._search_edit.setPlaceholderText("🔍  " + t("Search location…"))
         self._search_edit.setMinimumWidth(240)
         self._search_edit.setMaximumWidth(400)
         self._search_edit.setStyleSheet(
@@ -125,17 +128,17 @@ class SearchBar(QToolBar):
         self.addWidget(self._search_edit)
 
         btn_search = QToolButton(self)
-        btn_search.setText("Search")
-        btn_search.setToolTip("Search location (Enter)")
+        btn_search.setText(t("Search"))
+        btn_search.setToolTip(t("Search location (Enter)"))
         btn_search.clicked.connect(self._emit_search)
         self.addWidget(btn_search)
 
         self.addSeparator()
 
         # ── Tile provider ─────────────────────────────────────────────────── #
-        self.addWidget(QLabel("  Map: "))
+        self.addWidget(QLabel(t("  Map: ")))
         self._provider_combo = QComboBox()
-        self._provider_combo.setToolTip("Tile provider")
+        self._provider_combo.setToolTip(t("Tile provider"))
         self._provider_combo.setStyleSheet(
             "background:#3C3C3C; color:#D4D4D4;"
             "border:1px solid #555; border-radius:3px; padding:2px 6px;"
@@ -151,12 +154,12 @@ class SearchBar(QToolBar):
 
         # ── Zoom ──────────────────────────────────────────────────────────── #
         zi = QAction("＋", self)
-        zi.setToolTip("Zoom in  [ + ]")
+        zi.setToolTip(t("Zoom in  [ + ]"))
         zi.triggered.connect(self.zoom_in_requested)
         self.addAction(zi)
 
         zo = QAction("－", self)
-        zo.setToolTip("Zoom out  [ - ]")
+        zo.setToolTip(t("Zoom out  [ - ]"))
         zo.triggered.connect(self.zoom_out_requested)
         self.addAction(zo)
 
@@ -195,13 +198,25 @@ class MapToolbar(QToolBar):
     tool_selected = pyqtSignal(str)
     import_requested = pyqtSignal()
     print_requested = pyqtSignal()
+    toggle_grid_requested = pyqtSignal(bool)
+    # Emitted when the user types a degree value into the rotate spinbox
+    rotate_degree_changed = pyqtSignal(float)
 
-    _NAVIGATE_TOOLS: list[tuple[str, str, ToolMode]] = [
+    # Navigate section: SELECT, PAN | ROTATE, MOVE | separator | MAGIC_WAND (Dynamic Selector)
+    _NAVIGATE_TOOLS_PRIMARY: list[tuple[str, str, ToolMode]] = [
         ("⬡", "Select / move elements", ToolMode.SELECT),
         ("✋", "Pan the map", ToolMode.PAN),
-        ("✦", "Lasso: area-select to batch remove", ToolMode.MAGIC_WAND),
     ]
-
+    _ROTATE_MOVE_TOOLS: list[tuple[str, str, ToolMode]] = [
+        ("↻", "Rotate zone (click zone, then ↑/↓ to rotate 1° at a time)", ToolMode.ROTATE_ELEMENT),
+        ("✥", "Move element (click to pick, click to drop)", ToolMode.MOVE_ELEMENT),
+    ]
+    _LASSO_TOOL: tuple[str, str, ToolMode] = (
+        "✦", "Dynamic Selector", ToolMode.MAGIC_WAND
+    )
+    _MEASURE_TOOL: tuple[str, str, ToolMode] = (
+        "\U0001f4cf", "Measure distance on map (click points, Esc to clear)", ToolMode.MEASURE
+    )
     _CREATE_TOOLS: list[tuple[str, str, ToolMode]] = [
         ("⬠", "Draw polygon zone", ToolMode.DRAW_POLYGON),
         ("▭", "Draw rectangle zone", ToolMode.DRAW_RECTANGLE),
@@ -209,6 +224,8 @@ class MapToolbar(QToolBar):
         ("📍", "Place keypoint marker", ToolMode.DRAW_KEYPOINT),
         ("T", "Place text annotation", ToolMode.DRAW_TEXT),
     ]
+
+    # Tooltips are translated at widget-creation time via t().
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Activity", parent)
@@ -221,29 +238,110 @@ class MapToolbar(QToolBar):
         self._group = QActionGroup(self)
         self._group.setExclusive(True)
 
-        # ── Navigate ──────────────────────────────────────────────────────── #
-        for symbol, tooltip, mode in self._NAVIGATE_TOOLS:
+        # ── Navigate: primary (Select / Pan) ──────────────────────────────── #
+        for symbol, tooltip, mode in self._NAVIGATE_TOOLS_PRIMARY:
             act = QAction(symbol, self)
-            act.setToolTip(tooltip)
+            act.setToolTip(t(tooltip))
             act.setCheckable(True)
             act.setData(mode)
             act.triggered.connect(
-                lambda checked, m=mode: self.tool_selected.emit(m)
+                lambda checked, m=mode: (
+                    self.tool_selected.emit(m),
+                    self._rotate_container.setVisible(False),
+                )
             )
             self._group.addAction(act)
             self.addAction(act)
             self._tool_actions[mode] = act
+
+        # ── Navigate: Rotate + Move (no separator from primary) ───────────── #
+        for symbol, tooltip, mode in self._ROTATE_MOVE_TOOLS:
+            act = QAction(symbol, self)
+            act.setToolTip(t(tooltip))
+            act.setCheckable(True)
+            act.setData(mode)
+            act.triggered.connect(
+                lambda checked, m=mode: (
+                    self.tool_selected.emit(m),
+                    self._rotate_container.setVisible(m == ToolMode.ROTATE_ELEMENT),
+                )
+            )
+            self._group.addAction(act)
+            self.addAction(act)
+            self._tool_actions[mode] = act
+
+        # ── Rotate degree spinbox (hidden unless ROTATE_ELEMENT is active) ─── #
+        self._rotate_container = QWidget(self)
+        _rot_hbox_layout = QHBoxLayout(self._rotate_container)
+        _rot_hbox_layout.setContentsMargins(2, 0, 2, 0)
+        _rot_hbox_layout.setSpacing(2)
+        self._rotate_spinbox = QDoubleSpinBox()
+        self._rotate_spinbox.setRange(0.0, 359.9)
+        self._rotate_spinbox.setDecimals(1)
+        self._rotate_spinbox.setSuffix("°")
+        self._rotate_spinbox.setWrapping(True)
+        self._rotate_spinbox.setMinimumWidth(78)
+        self._rotate_spinbox.setMaximumWidth(78)
+        self._rotate_spinbox.setToolTip(t("Rotation angle — type a value or use ↑/↓ on the map"))
+        self._rotate_spinbox.setStyleSheet(
+            "QDoubleSpinBox { background:#3C3C3C; color:#D4D4D4;"
+            " border:1px solid #555; border-radius:3px; padding:2px 4px; font-size:11px; }"
+        )
+        self._rotate_spinbox.valueChanged.connect(
+            lambda v: self.rotate_degree_changed.emit(v)
+        )
+        _rot_hbox_layout.addWidget(self._rotate_spinbox)
+        self._rotate_container.setVisible(False)
+        self.addWidget(self._rotate_container)
+
+        # ── Separator before Dynamic Selector (lasso) ─────────────────────── #
+        self.addSeparator()
+
+        # ── Lasso (Dynamic Selector) ──────────────────────────────────────── #
+        symbol, tooltip, mode = self._LASSO_TOOL
+        act = QAction(symbol, self)
+        act.setToolTip(t(tooltip))
+        act.setCheckable(True)
+        act.setData(mode)
+        act.triggered.connect(
+            lambda checked, m=mode: (
+                self.tool_selected.emit(m),
+                self._rotate_container.setVisible(False),
+            )
+        )
+        self._group.addAction(act)
+        self.addAction(act)
+        self._tool_actions[mode] = act
+
+        # ── Measure tool ──────────────────────────────────────────────────── #
+        symbol, tooltip, mode = self._MEASURE_TOOL
+        act = QAction(symbol, self)
+        act.setToolTip(t(tooltip))
+        act.setCheckable(True)
+        act.setData(mode)
+        act.triggered.connect(
+            lambda checked, m=mode: (
+                self.tool_selected.emit(m),
+                self._rotate_container.setVisible(False),
+            )
+        )
+        self._group.addAction(act)
+        self.addAction(act)
+        self._tool_actions[mode] = act
 
         self.addSeparator()
 
         # ── Create ────────────────────────────────────────────────────────── #
         for symbol, tooltip, mode in self._CREATE_TOOLS:
             act = QAction(symbol, self)
-            act.setToolTip(tooltip)
+            act.setToolTip(t(tooltip))
             act.setCheckable(True)
             act.setData(mode)
             act.triggered.connect(
-                lambda checked, m=mode: self.tool_selected.emit(m)
+                lambda checked, m=mode: (
+                    self.tool_selected.emit(m),
+                    self._rotate_container.setVisible(False),
+                )
             )
             self._group.addAction(act)
             self.addAction(act)
@@ -258,14 +356,21 @@ class MapToolbar(QToolBar):
         )
         self.addWidget(spacer)
 
+        # ── Grid precision-move toggle ────────────────────────────────────── #
+        act_grid = QAction("▦", self)
+        act_grid.setToolTip(t("Toggle coordinate grid (precision move)"))
+        act_grid.setCheckable(True)
+        act_grid.toggled.connect(self.toggle_grid_requested)
+        self.addAction(act_grid)
+
         # ── Bottom utility actions ─────────────────────────────────────────── #
         act_import = QAction("⬇", self)
-        act_import.setToolTip("Import GeoJSON…")
+        act_import.setToolTip(t("Import GeoJSON…"))
         act_import.triggered.connect(self.import_requested)
         self.addAction(act_import)
 
         act_print = QAction("🖶", self)
-        act_print.setToolTip("Print / Export PDF…")
+        act_print.setToolTip(t("Print / Export PDF…"))
         act_print.triggered.connect(self.print_requested)
         self.addAction(act_print)
 
@@ -276,3 +381,10 @@ class MapToolbar(QToolBar):
         action = self._tool_actions.get(mode)
         if action:
             action.setChecked(True)
+        self._rotate_container.setVisible(mode == ToolMode.ROTATE_ELEMENT)
+
+    def set_rotate_angle(self, degrees: float) -> None:
+        """Update the rotate spinbox without re-emitting rotate_degree_changed."""
+        self._rotate_spinbox.blockSignals(True)
+        self._rotate_spinbox.setValue(degrees % 360.0)
+        self._rotate_spinbox.blockSignals(False)

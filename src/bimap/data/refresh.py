@@ -24,10 +24,16 @@ class RefreshWorker(QObject):
 
     def run(self) -> None:
         try:
+            self._connector.connect()
             rows = self._connector.fetch()
             self.finished.emit(self._source_id, rows)
         except Exception as exc:  # noqa: BLE001
             self.error.emit(self._source_id, str(exc))
+        finally:
+            try:
+                self._connector.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class DataRefreshManager(QObject):
@@ -74,6 +80,8 @@ class DataRefreshManager(QObject):
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         thread.finished.connect(thread.deleteLater)
+        # Remove entry from _threads when the thread finishes to prevent unbounded growth
+        thread.finished.connect(lambda _sid=source_id: self._threads.pop(_sid, None))
         self._threads[source_id] = thread
         thread.start()
 

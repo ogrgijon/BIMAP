@@ -23,8 +23,10 @@ def build_connector(ds: DataSource) -> DataSourceBase:
                 sheet_name=c.get("sheet_name", 0),
             )
         case SourceType.SQL:
+            from bimap.secrets import get_secret
+            conn_str = get_secret(f"datasource_{str(ds.id)}") or c.get("connection_string", "")
             return SqlSource(
-                connection_string=c.get("connection_string", ""),
+                connection_string=conn_str,
                 query=c.get("query", "SELECT 1"),
             )
         case SourceType.REST_API:
@@ -35,6 +37,11 @@ def build_connector(ds: DataSource) -> DataSourceBase:
             )
         case SourceType.GEOJSON:
             return GeoJsonSource(path_or_url=c.get("path_or_url", ""))
+        case SourceType.GOOGLE_SHEETS:
+            raise NotImplementedError(
+                "Google Sheets connector is not yet implemented. "
+                "Use a REST API source with the Sheets JSON export URL instead."
+            )
         case _:
             raise ValueError(f"Unsupported source type: {ds.source_type}")
 

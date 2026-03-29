@@ -8,18 +8,7 @@ import requests
 
 from bimap.config import HTTP_HEADERS
 from bimap.data.base import DataSourceBase
-
-
-def _jsonpath_get(data: Any, path: str) -> Any:
-    """Minimal dot-path extractor: 'results.items' -> data['results']['items']."""
-    for key in path.split("."):
-        if isinstance(data, dict):
-            data = data.get(key, {})
-        elif isinstance(data, list) and key.isdigit():
-            data = data[int(key)]
-        else:
-            return None
-    return data
+from bimap.engine._utils import get_nested
 
 
 class ApiSource(DataSourceBase):
@@ -55,7 +44,7 @@ class ApiSource(DataSourceBase):
             raise ValueError(f"API request failed: {exc}") from exc
 
         if self._data_path:
-            payload = _jsonpath_get(payload, self._data_path)
+            payload = get_nested(payload, self._data_path)
 
         if isinstance(payload, dict):
             payload = [payload]

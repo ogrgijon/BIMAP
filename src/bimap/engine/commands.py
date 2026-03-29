@@ -263,12 +263,15 @@ class RemoveDataSourceCommand(_ProjectCommand):
         self._source_id = source_id
         self._refresh_manager = refresh_manager
         self._backup: "DataSource | None" = None
+        self._connector = None  # saved from manager before unregister
 
     def redo(self) -> None:
         for ds in self._project.data_sources:
             if str(ds.id) == self._source_id:
                 self._backup = deepcopy(ds)
                 break
+        # Save the connector before unregistering so undo can restore it
+        self._connector = self._refresh_manager._connectors.get(self._source_id)
         self._project.data_sources = [
             s for s in self._project.data_sources if str(s.id) != self._source_id
         ]
@@ -278,7 +281,10 @@ class RemoveDataSourceCommand(_ProjectCommand):
 
     def undo(self) -> None:
         if self._backup:
-            self._project.data_sources.append(deepcopy(self._backup))
+            restored = deepcopy(self._backup)
+            self._project.data_sources.append(restored)
+            if self._connector is not None:
+                self._refresh_manager.register(restored, self._connector)
         self._project.mark_modified()
         self._notify()
 

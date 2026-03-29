@@ -19,25 +19,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from bimap.config import PDF_PAGE_SIZES, TILE_PROVIDERS, TILE_SIZE
+from bimap.config import TILE_PROVIDERS, TILE_SIZE
 from bimap.engine.tile_math import lat_lon_to_pixel, meters_per_pixel, visible_tiles
 from bimap.models.pdf_layout import LayoutItemType, PageOrientation, PDFLayout
 from bimap.models.project import Project
 
 
-# ── Point sizes of standard page sizes at 72 DPI ─────────────────────────────
-# QPdfWriter uses device pixels at the given resolution, so we work in mm and
-# let Qt convert.  72 pt = 25.4 mm, so 1 pt = 25.4/72 mm.
-_PT_TO_MM = 25.4 / 72.0
-
-# QPageSize enum integers (Qt's own enum)
-_PAGE_SIZE_MM: dict[str, tuple[float, float]] = {
-    # (width_mm, height_mm) in portrait
-    "A4":     (210.0,  297.0),
-    "A3":     (297.0,  420.0),
-    "Letter": (215.9,  279.4),
-    "Legal":  (215.9,  355.6),
-}
+from bimap.config import PDF_PAGE_SIZES_MM as _PAGE_SIZE_MM
 
 
 def render_pdf(project: Project, output_path: str) -> None:
@@ -149,9 +137,6 @@ def _render_map_frame(
             pm = QPixmap()
             pm.loadFromData(data)
             if not pm.isNull():
-                # scale tile to frame coordinate space
-                scale_x = fw / max(fw, 1)
-                scale_y = fh / max(fh, 1)
                 painter.drawPixmap(fx + px, fy + py, pm)
 
 

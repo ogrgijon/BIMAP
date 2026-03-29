@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from bimap.i18n import t
+
 # UserRole data stored on tree items
 _ROLE = Qt.ItemDataRole.UserRole
 
@@ -93,7 +95,7 @@ class LayersPanel(QWidget):
         layout.setContentsMargins(2, 4, 2, 4)
         layout.setSpacing(4)
 
-        header = QLabel("Layers")
+        header = QLabel(t("Layers"))
         header.setStyleSheet("font-weight: bold; padding: 2px;")
         layout.addWidget(header)
 
@@ -112,14 +114,14 @@ class LayersPanel(QWidget):
         layout.addWidget(self._tree)
 
         row1 = QHBoxLayout()
-        btn_add = QPushButton("+ Layer")
-        btn_add.setToolTip("Add a new layer")
+        btn_add = QPushButton(t("+ Layer"))
+        btn_add.setToolTip(t("Add a new layer"))
         btn_add.clicked.connect(self.layer_add_requested)
         row1.addWidget(btn_add)
         layout.addLayout(row1)
 
-        btn_csv = QPushButton("Export Layer CSV…")
-        btn_csv.setToolTip("Export elements of the selected layer to CSV")
+        btn_csv = QPushButton(t("Export Layer CSV…"))
+        btn_csv.setToolTip(t("Export elements of the selected layer to CSV"))
         btn_csv.clicked.connect(self._on_export_csv)
         layout.addWidget(btn_csv)
 
@@ -255,21 +257,21 @@ class LayersPanel(QWidget):
         menu = QMenu(self)
         if d[0] == "_layer":
             layer_name = d[1]
-            act_remove = menu.addAction("🗑  Remove Layer…")
+            act_remove = menu.addAction(t("🗑  Remove Layer…"))
             chosen = menu.exec(self._tree.mapToGlobal(pos))
             if chosen == act_remove:
                 if layer_name == "Default":
-                    QMessageBox.warning(self, "Cannot Remove",
-                                        "The 'Default' layer cannot be removed.")
+                    QMessageBox.warning(self, t("Cannot Remove"),
+                                        t("The 'Default' layer cannot be removed."))
                     return
                 self.layer_remove_requested.emit(layer_name)
         else:
             etype, eid = d
-            act_goto   = menu.addAction("🎯  Go to")
-            act_edit   = menu.addAction("✏  Edit…")
-            act_update = menu.addAction("🔄  Update")
+            act_goto   = menu.addAction(t("🎯  Go to"))
+            act_edit   = menu.addAction(t("✏  Edit…"))
+            act_update = menu.addAction(t("🔄  Update"))
             menu.addSeparator()
-            act_remove = menu.addAction("🗑  Remove…")
+            act_remove = menu.addAction(t("🗑  Remove…"))
             chosen = menu.exec(self._tree.mapToGlobal(pos))
             if chosen == act_goto:
                 self.element_action_requested.emit("go_to", etype, eid)
@@ -307,29 +309,100 @@ class LayersPanel(QWidget):
         if not path:
             return
 
+        # Collect all visible metadata keys across elements in this layer
+        all_meta_keys: set[str] = set()
+        for zone in self._project.zones:
+            if getattr(zone, "layer", "Default") == layer_name:
+                hidden = set(getattr(zone, "metadata_hidden", []))
+                for k in zone.metadata:
+                    if k not in hidden and not k.startswith("__"):
+                        all_meta_keys.add(k)
+        for kp in self._project.keypoints:
+            if getattr(kp, "layer", "Default") == layer_name:
+                hidden = set(getattr(kp, "metadata_hidden", []))
+                for k in kp.metadata:
+                    if k not in hidden and not k.startswith("__"):
+                        all_meta_keys.add(k)
+
+        meta_keys = sorted(all_meta_keys)
+        base_fields = ["type", "id", "name", "lat", "lon", "layer",
+                       "zone_type", "radius_m", "width_m", "height_m", "rotation_deg"]
+        _DERIVED = ["area_m2", "perimeter_m", "centroid_lat", "centroid_lon", "vertex_count"]
+        all_fields = base_fields + _DERIVED + meta_keys
+
         rows: list[dict[str, object]] = []
 
         for zone in self._project.zones:
-            if getattr(zone, "layer", "Default") == layer_name:
-                lat = zone.coordinates[0].lat if zone.coordinates else ""
-                lon = zone.coordinates[0].lon if zone.coordinates else ""
-                rows.append({"type": "zone", "name": zone.name, "lat": lat, "lon": lon, "layer": layer_name})
+            if getattr(zone, "layer", "Default") != layer_name:
+                continue
+            coords = zone.coordinates
+            if coords:
+                lat = round(sum(c.lat for c in coords) / len(coords), 7)
+                lon = round(sum(c.lon for c in coords) / len(coords), 7)
+            else:
+                lat = lon = ""
+            hidden = set(getattr(zone, "metadata_hidden", []))
+            row: dict = {
+                "type": "zone",
+                "id": str(zone.id),
+                "name": zone.name,
+                "lat": lat,
+                "lon": lon,
+                "layer": layer_name,
+                "zone_type": zone.zone_type,
+                "radius_m": zone.radius_m if zone.zone_type == "circle" else "",
+                "width_m": zone.width_m or "",
+                "height_m": zone.height_m or "",
+                "rotation_deg": zone.rotation_deg if zone.rotation_deg else "",
+            }
+            for dk in _DERIVED:
+                row[dk] = zone.metadata.get(dk, "")
+            for k in meta_keys:
+                row[k] = zone.metadata.get(k, "") if k not in hidden else ""
+            rows.append(row)
 
         for kp in self._project.keypoints:
-            if getattr(kp, "layer", "Default") == layer_name:
-                rows.append({"type": "keypoint", "name": kp.info_card.title or "Pin",
-                              "lat": kp.lat, "lon": kp.lon, "layer": layer_name})
+            if getattr(kp, "layer", "Default") != layer_name:
+                continue
+            hidden = set(getattr(kp, "metadata_hidden", []))
+            row = {
+                "type": "keypoint",
+                "id": str(kp.id),
+                "name": kp.info_card.title or kp.name,
+                "lat": round(kp.lat, 7),
+                "lon": round(kp.lon, 7),
+                "layer": layer_name,
+                "zone_type": "", "radius_m": "", "width_m": "", "height_m": "", "rotation_deg": "",
+            }
+            for dk in _DERIVED:
+                row[dk] = ""
+            for k in meta_keys:
+                row[k] = kp.metadata.get(k, "") if k not in hidden else ""
+            rows.append(row)
 
         for ann in self._project.annotations:
-            if getattr(ann, "layer", "Default") == layer_name:
-                rows.append({"type": "annotation", "name": ann.content[:60],
-                              "lat": ann.anchor_lat or "", "lon": ann.anchor_lon or "",
-                              "layer": layer_name})
+            if getattr(ann, "layer", "Default") != layer_name:
+                continue
+            rows.append({
+                "type": "annotation",
+                "id": str(getattr(ann, "id", "")),
+                "name": ann.content[:60],
+                "lat": ann.anchor_lat or "",
+                "lon": ann.anchor_lon or "",
+                "layer": layer_name,
+                "zone_type": "", "radius_m": "", "width_m": "", "height_m": "", "rotation_deg": "",
+                **{dk: "" for dk in _DERIVED},
+                **{k: "" for k in meta_keys},
+            })
 
-        with open(path, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=["type", "name", "lat", "lon", "layer"])
-            writer.writeheader()
-            writer.writerows(rows)
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                writer = csv.DictWriter(fh, fieldnames=all_fields, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(rows)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export Failed", str(exc))
+            return
 
         QMessageBox.information(
             self, "CSV Exported", f"Exported {len(rows)} element(s) to:\n{path}"

@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from bimap.models.data_source import DataSource, RefreshMode, SourceType
+from bimap.i18n import t
 
 
 class DataSourceDialog(QDialog):
@@ -28,7 +29,7 @@ class DataSourceDialog(QDialog):
     def __init__(self, source: DataSource | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._source: DataSource = source or DataSource()
-        self.setWindowTitle("Data Source" if source else "Add Data Source")
+        self.setWindowTitle(t("Data Source") if source else t("Add Data Source"))
         self.setMinimumWidth(440)
         self._setup_ui()
         if source:
@@ -39,13 +40,15 @@ class DataSourceDialog(QDialog):
 
         form = QFormLayout()
         self._name_edit = QLineEdit()
-        form.addRow("Name", self._name_edit)
+        form.addRow(t("Name"), self._name_edit)
 
         self._type_combo = QComboBox()
         for st in SourceType:
+            if st == SourceType.GOOGLE_SHEETS:
+                continue
             self._type_combo.addItem(st.value, st)
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
-        form.addRow("Type", self._type_combo)
+        form.addRow(t("Type"), self._type_combo)
         root.addLayout(form)
 
         # Stacked pages per source type
@@ -58,17 +61,17 @@ class DataSourceDialog(QDialog):
         root.addWidget(self._stack)
 
         # Refresh settings
-        refresh_grp = QGroupBox("Refresh")
+        refresh_grp = QGroupBox(t("Refresh"))
         refresh_form = QFormLayout(refresh_grp)
         self._refresh_combo = QComboBox()
         for rm in RefreshMode:
             self._refresh_combo.addItem(rm.value, rm)
-        refresh_form.addRow("Mode", self._refresh_combo)
+        refresh_form.addRow(t("Mode"), self._refresh_combo)
         self._interval_spin = QSpinBox()
         self._interval_spin.setRange(30, 86400)
         self._interval_spin.setSuffix(" sec")
         self._interval_spin.setValue(300)
-        refresh_form.addRow("Interval", self._interval_spin)
+        refresh_form.addRow(t("Interval"), self._interval_spin)
         root.addWidget(refresh_grp)
 
         buttons = QDialogButtonBox(
@@ -165,7 +168,14 @@ class DataSourceDialog(QDialog):
         # Populate page fields from connection dict
         page = self._pages.get(source.source_type.value)
         if page:
-            for key, val in source.connection.items():
+            conn = dict(source.connection)
+            # Restore SQL connection_string from keychain for editing
+            if source.source_type.value == "sql" and "connection_string" not in conn:
+                from bimap.secrets import get_secret
+                stored = get_secret(f"datasource_{str(source.id)}")
+                if stored:
+                    conn["connection_string"] = stored
+            for key, val in conn.items():
                 edit = page.findChild(QLineEdit, key)
                 if edit:
                     edit.setText(str(val))
@@ -183,6 +193,12 @@ class DataSourceDialog(QDialog):
                 if edit.objectName():
                     conn[edit.objectName()] = edit.text()
             self._source.connection = conn
+        # Move SQL connection_string to OS keychain so it is not saved in the project file
+        if self._source.source_type.value == "sql":
+            conn_str = self._source.connection.pop("connection_string", "") or ""
+            if conn_str:
+                from bimap.secrets import set_secret
+                set_secret(f"datasource_{str(self._source.id)}", conn_str)
         self.accept()
 
     @property

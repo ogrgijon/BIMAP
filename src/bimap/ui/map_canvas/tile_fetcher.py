@@ -11,6 +11,7 @@ Architecture:
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, pyqtSignal
@@ -37,8 +38,8 @@ def get_tile_cache() -> TileCache:
 
 # ── Tile fetch runnable ────────────────────────────────────────────────────────
 
-# Cancellation flag — set to True to stop all pending tile fetches immediately
-_cancelled: bool = False
+# Cancellation event — set() to stop all pending tile fetches immediately
+_cancel_event: threading.Event = threading.Event()
 
 
 class TileFetchSignals(QObject):
@@ -57,9 +58,12 @@ class TileFetchRunnable(QRunnable):
         self.signals = TileFetchSignals()
 
     def run(self) -> None:
-        global _cancelled
-        if _cancelled:
+        if _cancel_event.is_set():
             return
+        # Keep a local Python reference — the QRunnable's C++ side may be
+        # deleted by the thread pool before the except/finally block runs,
+        # which would make `self.signals` a dangling pointer.
+        signals = self.signals
         t = self._tile
         cache = get_tile_cache()
         cache_key = f"{self._url_template}_{t.z}_{t.x}_{t.y}"
@@ -67,7 +71,10 @@ class TileFetchRunnable(QRunnable):
         if cached:
             pm = _bytes_to_pixmap(cached)
             if pm and not pm.isNull():
-                self.signals.tile_ready.emit(t.x, t.y, t.z, pm)
+                try:
+                    signals.tile_ready.emit(t.x, t.y, t.z, pm)
+                except RuntimeError:
+                    pass
                 return
 
         url = (
@@ -76,28 +83,56 @@ class TileFetchRunnable(QRunnable):
             .replace("{x}", str(t.x))
             .replace("{y}", str(t.y))
         )
-        import time
         data: bytes | None = None
-        for attempt in range(3):
-            if _cancelled:
-                return
+        try:
+            resp = requests.get(url, headers=HTTP_HEADERS, timeout=5)
+            resp.raise_for_status()
+            data = resp.content
+        except requests.RequestException:
+            pass
+
+        if data is None:
+            # Network unavailable — try serving a parent tile from the disk cache
+            # (covers tiles pre-saved via "Work Offline" or previously downloaded).
+            for parent_z in range(t.z - 1, max(t.z - 4, 0), -1):
+                diff = t.z - parent_z
+                p_key = f"{self._url_template}_{parent_z}_{t.x >> diff}_{t.y >> diff}"
+                p_data = cache.get(p_key)
+                if p_data:
+                    p_pm = _bytes_to_pixmap(p_data)
+                    if p_pm and not p_pm.isNull():
+                        from bimap.config import TILE_SIZE
+                        scale = 2 ** diff
+                        src_size = max(TILE_SIZE // scale, 1)
+                        col = t.x & (scale - 1)
+                        row = t.y & (scale - 1)
+                        cropped = p_pm.copy(col * src_size, row * src_size,
+                                            src_size, src_size)
+                        scaled = cropped.scaled(
+                            TILE_SIZE, TILE_SIZE,
+                            Qt.AspectRatioMode.IgnoreAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                        try:
+                            signals.tile_ready.emit(t.x, t.y, t.z, scaled)
+                        except RuntimeError:
+                            pass
+                        return
             try:
-                resp = requests.get(url, headers=HTTP_HEADERS, timeout=10)
-                resp.raise_for_status()
-                data = resp.content
-                break
-            except requests.RequestException:
-                if attempt == 2:
-                    self.signals.tile_error.emit(t.x, t.y, t.z)
-                    return
-                time.sleep(0.4 * (2 ** attempt))
+                signals.tile_error.emit(t.x, t.y, t.z)
+            except RuntimeError:
+                pass
+            return
 
         cache.put(cache_key, data)
         pm = _bytes_to_pixmap(data)
-        if pm and not pm.isNull():
-            self.signals.tile_ready.emit(t.x, t.y, t.z, pm)
-        else:
-            self.signals.tile_error.emit(t.x, t.y, t.z)
+        try:
+            if pm and not pm.isNull():
+                signals.tile_ready.emit(t.x, t.y, t.z, pm)
+            else:
+                signals.tile_error.emit(t.x, t.y, t.z)
+        except RuntimeError:
+            pass
 
 
 def _bytes_to_pixmap(data: bytes) -> QPixmap:

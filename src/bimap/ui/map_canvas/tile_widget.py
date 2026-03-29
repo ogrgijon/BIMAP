@@ -46,6 +46,7 @@ from bimap.engine.tile_math import (
 from bimap.ui.map_canvas.tile_fetcher import TileFetchRunnable, get_tile_cache
 from bimap.ui.map_canvas.overlay_renderer import OverlayRenderer
 from bimap.ui.map_canvas.interaction import InteractionHandler, ToolMode
+from bimap.i18n import t
 
 
 class TileWidget(QWidget):
@@ -68,6 +69,9 @@ class TileWidget(QWidget):
     multi_select_finished = pyqtSignal(list)
     element_move_dropped = pyqtSignal(str, str, float, float)
     add_annotation_requested = pyqtSignal(str, float, float)  # ann_type, lat, lon
+    open_extension_requested = pyqtSignal(str, str)           # etype, eid
+    element_rotated = pyqtSignal(str, str, float)             # etype, eid, degrees
+    network_status_changed = pyqtSignal(bool)                 # True = online, False = offline
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -84,6 +88,12 @@ class TileWidget(QWidget):
         # Tile storage keyed by (x, y, z)
         self._tiles: dict[tuple[int, int, int], QPixmap] = {}
         self._pending: set[tuple[int, int, int]] = set()
+        # Tiles that failed to load (not re-requested until provider/viewport changes)
+        self._failed: set[tuple[int, int, int]] = set()
+
+        # Online/offline detection
+        self._consecutive_errors: int = 0
+        self._is_online: bool = True
 
         # Thread pool for tile fetching
         self._thread_pool = QThreadPool.globalInstance()
@@ -105,11 +115,22 @@ class TileWidget(QWidget):
         self._interaction.element_selected.connect(self.element_selected)
         self._interaction.multi_select_finished.connect(self.multi_select_finished)
         self._interaction.element_move_dropped.connect(self.element_move_dropped)
+        self._interaction.open_extension_requested.connect(self.open_extension_requested)
+        self._interaction.element_rotated.connect(self.element_rotated)
 
         # Drag state
         self._drag_start: QPoint | None = None
         self._drag_center_lat: float = self._center_lat
         self._drag_center_lon: float = self._center_lon
+
+        # Overlay visibility flags (controlled via set_overlay_flags)
+        self._show_scale_bar: bool = True
+        self._show_north_arrow: bool = True
+        self._show_grid: bool = False
+        self._grid_scale: float = 1.0
+
+        # Live-feed positions: layer_id → list of position dicts
+        self._live_positions: dict[str, list[dict]] = {}
 
         # Project reference (set externally)
         self._project = None
@@ -128,7 +149,12 @@ class TileWidget(QWidget):
     def set_viewport(self, lat: float, lon: float, zoom: int) -> None:
         self._center_lat = lat
         self._center_lon = lon
-        self._zoom = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
+        provider_max = TILE_PROVIDERS.get(self._tile_provider, {}).get("max_zoom", MAX_ZOOM)
+        effective_max = min(provider_max, self._max_zoom_for_10m())
+        self._zoom = max(MIN_ZOOM, min(effective_max, zoom))
+        # Clear failed tiles when the viewport changes so offline-cached tiles
+        # are retried after a pan/zoom (the offline region may now be available)
+        self._failed.clear()
         self._refresh_tiles()
         self.update()
         self.viewport_changed.emit(self._center_lat, self._center_lon, self._zoom)
@@ -138,8 +164,33 @@ class TileWidget(QWidget):
             self._tile_provider = provider_key
             self._tiles.clear()
             self._pending.clear()
+            self._failed.clear()
             self._refresh_tiles()
             self.update()
+
+    def set_overlay_flags(
+        self, show_scale_bar: bool, show_north_arrow: bool, show_grid: bool = False
+    ) -> None:
+        """Toggle scale bar, north arrow, and coordinate grid overlays."""
+        self._show_scale_bar = show_scale_bar
+        self._show_north_arrow = show_north_arrow
+        self._show_grid = show_grid
+        self.update()
+
+    def set_grid_scale(self, scale: float) -> None:
+        """Set the grid density multiplier (0.5 = fine, 1.0 = normal, 2.0 = coarse)."""
+        self._grid_scale = max(0.1, scale)
+        self.update()
+
+    def update_live_positions(self, layer_id: str, positions: list[dict]) -> None:
+        """Store latest polled positions for a layer and repaint."""
+        self._live_positions[layer_id] = positions
+        self.update()
+
+    def clear_live_positions(self, layer_id: str) -> None:
+        """Remove stored positions for a layer and repaint."""
+        self._live_positions.pop(layer_id, None)
+        self.update()
 
     def set_tool(self, mode: ToolMode) -> None:
         self._interaction.set_tool(mode)
@@ -153,6 +204,8 @@ class TileWidget(QWidget):
             ToolMode.DRAW_TEXT: Qt.CursorShape.IBeamCursor,
             ToolMode.MAGIC_WAND: Qt.CursorShape.CrossCursor,
             ToolMode.MOVE_ELEMENT: Qt.CursorShape.SizeAllCursor,
+            ToolMode.ROTATE_ELEMENT: Qt.CursorShape.CrossCursor,
+            ToolMode.MEASURE: Qt.CursorShape.CrossCursor,
         }
         self.setCursor(QCursor(cursor_map.get(mode, Qt.CursorShape.ArrowCursor)))
 
@@ -212,6 +265,12 @@ class TileWidget(QWidget):
                 selected_id=self._interaction.selected_id or "",
                 multi_selected=self._interaction.multi_selected,
                 delimitation_polygon=self._project.map_state.delimitation_polygon,
+                show_scale_bar=self._show_scale_bar,
+                show_north_arrow=self._show_north_arrow,
+                show_grid=self._show_grid,
+                grid_scale=self._grid_scale,
+                live_layers=self._project.live_layers,
+                live_positions=self._live_positions,
             )
 
         # 3. Draw in-progress drawing preview
@@ -227,15 +286,28 @@ class TileWidget(QWidget):
             self._center_lat, self._center_lon, self._zoom,
             self.width(), self.height()
         )
+        provider_max = TILE_PROVIDERS.get(self._tile_provider, {}).get("max_zoom", MAX_ZOOM)
+        beyond_server_max = self._zoom > provider_max
         for tile_coord, px, py in tiles:
             key = (tile_coord.x, tile_coord.y, tile_coord.z)
             pm = self._tiles.get(key)
             if pm:
                 painter.drawPixmap(px, py, pm)
             else:
-                # Draw placeholder
-                painter.fillRect(px, py, TILE_SIZE, TILE_SIZE, QColor(220, 220, 220))
-                self._request_tile(tile_coord)
+                # When zoomed beyond the tile server's max, scale up a cached
+                # parent tile rather than showing an empty grey square.
+                fallback = None
+                if beyond_server_max:
+                    fallback = self._scaled_fallback_tile(
+                        tile_coord.x, tile_coord.y, tile_coord.z, provider_max
+                    )
+                if fallback:
+                    painter.drawPixmap(px, py, fallback)
+                else:
+                    # Draw placeholder and schedule a fetch (will return an
+                    # error at server-max zoom which _on_tile_error handles).
+                    painter.fillRect(px, py, TILE_SIZE, TILE_SIZE, QColor(220, 220, 220))
+                    self._request_tile(tile_coord)
 
     def _paint_attribution(self, painter: QPainter) -> None:
         provider = TILE_PROVIDERS.get(self._tile_provider, {})
@@ -258,12 +330,12 @@ class TileWidget(QWidget):
         )
         for tile_coord, _, _ in tiles:
             key = (tile_coord.x, tile_coord.y, tile_coord.z)
-            if key not in self._tiles:
+            if key not in self._tiles and key not in self._failed:
                 self._request_tile(tile_coord)
 
     def _request_tile(self, tile: "TileCoord") -> None:
         key = (tile.x, tile.y, tile.z)
-        if key in self._pending or key in self._tiles:
+        if key in self._pending or key in self._tiles or key in self._failed:
             return
         self._pending.add(key)
         url_template = TILE_PROVIDERS[self._tile_provider]["url"]
@@ -275,6 +347,10 @@ class TileWidget(QWidget):
     def _on_tile_ready(self, x: int, y: int, z: int, pm: QPixmap) -> None:
         key = (x, y, z)
         self._pending.discard(key)
+        self._consecutive_errors = 0
+        if not self._is_online:
+            self._is_online = True
+            self.network_status_changed.emit(True)
         if z == self._zoom:   # only store if still relevant zoom
             self._tiles[key] = pm
             # LRU eviction: keep at most 300 tiles in memory
@@ -284,7 +360,66 @@ class TileWidget(QWidget):
             self.update()
 
     def _on_tile_error(self, x: int, y: int, z: int) -> None:
-        self._pending.discard((x, y, z))
+        key = (x, y, z)
+        self._pending.discard(key)
+        self._consecutive_errors += 1
+        if self._consecutive_errors >= 3 and self._is_online:
+            self._is_online = False
+            self.network_status_changed.emit(False)
+        # Try to synthesise a scaled-up pixmap from a cached lower-zoom parent
+        # tile (checks up to 4 levels up, in both memory and disk cache).
+        if z == self._zoom:   # only bother if the error is for the current view
+            fallback = self._scaled_fallback_tile(x, y, z, max(z - 4, 1))
+            if fallback:
+                self._tiles[key] = fallback
+                self.update()
+            else:
+                # Mark as failed so we don't endlessly re-request when offline
+                self._failed.add(key)
+
+    def refresh_tiles(self) -> None:
+        """Clear the failed-tile cache and repaint. Call after restoring connectivity."""
+        self._failed.clear()
+        self._consecutive_errors = 0
+        self.update()
+
+    def _scaled_fallback_tile(
+        self, x: int, y: int, z: int, max_server_zoom: int
+    ) -> QPixmap | None:
+        """Return a pixmap for tile (x, y, z) by cropping and scaling a
+        cached ancestor tile at *max_server_zoom* (or the closest available).
+        Checks both the in-memory tile dict and the on-disk cache."""
+        from bimap.ui.map_canvas.tile_fetcher import get_tile_cache, _bytes_to_pixmap
+        disk_cache = get_tile_cache()
+        url_template = TILE_PROVIDERS[self._tile_provider]["url"]
+
+        for parent_z in range(z - 1, max(max_server_zoom - 1, 0), -1):
+            diff = z - parent_z
+            scale = 2 ** diff             # parent tile covers 2^diff child tiles
+            parent_x = x >> diff
+            parent_y = y >> diff
+            parent_pm = self._tiles.get((parent_x, parent_y, parent_z))
+            if parent_pm is None:
+                # check disk cache as fallback
+                cache_key = f"{url_template}_{parent_z}_{parent_x}_{parent_y}"
+                p_data = disk_cache.get(cache_key)
+                if p_data:
+                    parent_pm = _bytes_to_pixmap(p_data)
+            if parent_pm is None or parent_pm.isNull():
+                continue
+            # Sub-tile offset within the parent
+            col = x & (scale - 1)
+            row = y & (scale - 1)
+            src_size = TILE_SIZE // scale
+            src_x = col * src_size
+            src_y = row * src_size
+            cropped = parent_pm.copy(src_x, src_y, max(src_size, 1), max(src_size, 1))
+            return cropped.scaled(
+                TILE_SIZE, TILE_SIZE,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        return None
 
     # ── Mouse / Keyboard events ────────────────────────────────────────────────
 
@@ -333,8 +468,11 @@ class TileWidget(QWidget):
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         delta = event.angleDelta().y()
+        provider_max = TILE_PROVIDERS.get(self._tile_provider, {}).get("max_zoom", MAX_ZOOM)
+        scale_max = self._max_zoom_for_10m()
+        effective_max = min(provider_max, scale_max)
         if delta > 0:
-            new_zoom = min(self._zoom + 1, MAX_ZOOM)
+            new_zoom = min(self._zoom + 1, effective_max)
         else:
             new_zoom = max(self._zoom - 1, MIN_ZOOM)
         if new_zoom != self._zoom:
@@ -360,21 +498,46 @@ class TileWidget(QWidget):
             )
             self._center_lat = new_lat
             self._center_lon = new_lon
-            self._tiles.clear()
-            self._pending.clear()
+            # Do NOT clear self._tiles here — lower-zoom tiles already in cache
+            # are needed by _scaled_fallback_tile when the server rejects high-zoom
+            # requests (e.g. OSM returns HTTP 400 beyond zoom 19).
+            # The 300-tile LRU eviction in _on_tile_ready manages memory instead.
+            self._pending.clear()  # cancel any in-flight requests for the old zoom
             self._refresh_tiles()
             self.update()
             self.viewport_changed.emit(self._center_lat, self._center_lon, self._zoom)
 
     def zoom_in(self) -> None:
         """Zoom in one level, centred on the current viewport centre."""
+        provider_max = TILE_PROVIDERS.get(self._tile_provider, {}).get("max_zoom", MAX_ZOOM)
+        effective_max = min(provider_max, self._max_zoom_for_10m())
         self.set_viewport(self._center_lat, self._center_lon,
-                          min(self._zoom + 1, MAX_ZOOM))
+                          min(self._zoom + 1, effective_max))
 
     def zoom_out(self) -> None:
         """Zoom out one level, centred on the current viewport centre."""
         self.set_viewport(self._center_lat, self._center_lon,
                           max(self._zoom - 1, MIN_ZOOM))
+
+    def _max_zoom_for_10m(self, min_viewport_m: float = 10.0) -> int:
+        """Return the highest zoom level at which the viewport width stays >= min_viewport_m.
+
+        Prevents zooming so close that map geometry distorts below 10 m resolution.
+        Tiles: at zoom z, metres/pixel at latitude φ = cos(φ) × 40075016 / (256 × 2^z).
+        Viewport width in metres = width_px × metres_per_pixel.
+        Solving for z: z_max = floor(log2(cos(φ) × 40075016 × w / (256 × min_m))).
+        """
+        w = self.width()
+        if w <= 0:
+            # Widget not yet laid out — allow any zoom
+            return MAX_ZOOM
+        cos_lat = math.cos(math.radians(self._center_lat))
+        numerator = cos_lat * 40_075_016.0 * w
+        denominator = 256.0 * min_viewport_m
+        if numerator <= 0 or denominator <= 0:
+            return MAX_ZOOM
+        z_max = int(math.floor(math.log2(numerator / denominator)))
+        return max(MIN_ZOOM, min(MAX_ZOOM, z_max))
 
     def select_element(self, element_type: str, element_id: str) -> None:
         """Highlight a specific element on the canvas (pass to interaction handler)."""
@@ -403,21 +566,59 @@ class TileWidget(QWidget):
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         pos = event.pos()
+        # In MEASURE mode the only context action is to clear the measurement
+        if self._interaction.tool == ToolMode.MEASURE:
+            menu = QMenu(self)
+            act_clear = menu.addAction(t("Clear Measurement"))
+            if menu.exec(event.globalPos()) == act_clear:
+                handler = self._interaction
+                handler._measure_pts.clear()
+                handler._measure_latlon.clear()
+                handler.request_repaint.emit()
+            return
         hit_type, hit_id = self._hit_test(float(pos.x()), float(pos.y()))
         menu = QMenu(self)
         if not hit_type:
             # Empty canvas — offer text annotation creation at this position
-            act_text = menu.addAction("📝  Add Text here")
+            act_text = menu.addAction(t("📝  Add Text here"))
             chosen = menu.exec(event.globalPos())
             lat, lon = self.px_to_lat_lon(float(pos.x()), float(pos.y()))
             if chosen == act_text:
                 self.add_annotation_requested.emit("text_box", lat, lon)
             return
-        act_edit     = menu.addAction("✏  Edit…")
-        act_move     = menu.addAction("↔  Move")
-        act_metadata = menu.addAction("📋  View Metadata…")
+        # Check if this element has an extension defined
+        element = None
+        if self._project:
+            element = next(
+                (e for e in (*self._project.zones, *self._project.keypoints)
+                 if str(getattr(e, "id", "")) == hit_id),
+                None
+            )
+        has_extension = bool(element and getattr(element, "extension_html", ""))
+        # Check if there are applicable form designs for this element type
+        has_forms = False
+        if self._project and hasattr(self._project, "form_designs"):
+            has_forms = any(
+                fd.target in ("both", hit_type)
+                for fd in self._project.form_designs
+            )
+        act_edit     = menu.addAction(t("✏  Edit…"))
+        act_move     = menu.addAction(t("↔  Move"))
+        if has_forms:
+            act_edit_info = menu.addAction(t("📝  Edit Info…"))
+        else:
+            act_edit_info = None
+        act_metadata = menu.addAction(t("📋  View Metadata…"))
+        if has_extension:
+            act_open_ext = menu.addAction(t("🔗  Open Extension…"))
+        else:
+            act_open_ext = None
+        if hit_type == "keypoint":
+            act_to_zone = menu.addAction(t("⬡  Convert to Zone by Color…"))
+        else:
+            act_to_zone = None
         menu.addSeparator()
-        act_remove   = menu.addAction("🗑  Remove…")
+        act_remove   = menu.addAction(t("🗑  Remove…"))
         chosen = menu.exec(event.globalPos())
         if chosen == act_remove:
             self.context_action_requested.emit("remove", hit_type, hit_id)
@@ -425,8 +626,130 @@ class TileWidget(QWidget):
             self.context_action_requested.emit("edit", hit_type, hit_id)
         elif chosen == act_move:
             self.context_action_requested.emit("move", hit_type, hit_id)
+        elif act_edit_info and chosen == act_edit_info:
+            self.context_action_requested.emit("edit_info", hit_type, hit_id)
         elif chosen == act_metadata:
             self.context_action_requested.emit("view_metadata", hit_type, hit_id)
+        elif act_open_ext and chosen == act_open_ext:
+            self.context_action_requested.emit("open_extension", hit_type, hit_id)
+        elif act_to_zone and chosen == act_to_zone:
+            self._convert_keypoint_to_zone(hit_id)
+
+    def _convert_keypoint_to_zone(self, keypoint_id: str) -> None:
+        """Flood-fill the map tiles from the keypoint pixel and create a polygon zone."""
+        if not self._project:
+            return
+        kp = next((k for k in self._project.keypoints if str(k.id) == keypoint_id), None)
+        if kp is None:
+            return
+
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QSlider, QDialogButtonBox
+        from collections import deque
+
+        # ── Ask user for tolerance ────────────────────────────────────────────
+        dlg = QDialog(self)
+        dlg.setWindowTitle(t("Convert to Zone by Color"))
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(t("Color tolerance (0 = exact match, 100 = all colors):")))
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(30)
+        lay.addWidget(slider)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+        if not dlg.exec():
+            return
+        tolerance = slider.value()
+
+        # ── Render tiles-only into a QImage ──────────────────────────────────
+        img = QImage(self.width(), self.height(), QImage.Format.Format_RGB32)
+        img.fill(QColor(220, 220, 220))
+        img_painter = QPainter(img)
+        self._paint_tiles(img_painter)
+        img_painter.end()
+
+        # ── Find seed pixel ────────────────────────────────────────────────
+        seed_pt = self.lat_lon_to_px(kp.lat, kp.lon)
+        sx, sy = int(round(seed_pt.x())), int(round(seed_pt.y()))
+        w, h = self.width(), self.height()
+        if not (0 <= sx < w and 0 <= sy < h):
+            return
+
+        seed_rgb = img.pixel(sx, sy)
+        seed_r = (seed_rgb >> 16) & 0xFF
+        seed_g = (seed_rgb >> 8) & 0xFF
+        seed_b = seed_rgb & 0xFF
+
+        def _in_tolerance(px_rgb: int) -> bool:
+            r = (px_rgb >> 16) & 0xFF
+            g = (px_rgb >> 8) & 0xFF
+            b = px_rgb & 0xFF
+            return (abs(r - seed_r) + abs(g - seed_g) + abs(b - seed_b)) <= tolerance * 3
+
+        # ── BFS flood fill (limit area to avoid runaway on uniform tiles) ────
+        MAX_PIXELS = 200_000
+        filled: set[tuple[int, int]] = set()
+        queue: deque[tuple[int, int]] = deque()
+        queue.append((sx, sy))
+        filled.add((sx, sy))
+        while queue and len(filled) < MAX_PIXELS:
+            cx, cy = queue.popleft()
+            for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in filled:
+                    if _in_tolerance(img.pixel(nx, ny)):
+                        filled.add((nx, ny))
+                        queue.append((nx, ny))
+
+        if len(filled) < 4:
+            return
+
+        # ── Extract boundary pixels (pixels in `filled` adjacent to outside) ─
+        boundary = [
+            (x, y) for x, y in filled
+            if any(
+                (x + dx, y + dy) not in filled
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            )
+        ]
+
+        # ── Simplify: convex hull via gift-wrapping ──────────────────────────
+        if len(boundary) < 3:
+            return
+
+        def _cross(o, a, b):
+            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+        pts = sorted(set(boundary))
+        n = len(pts)
+        lower: list[tuple[int, int]] = []
+        for p in pts:
+            while len(lower) >= 2 and _cross(lower[-2], lower[-1], p) <= 0:
+                lower.pop()
+            lower.append(p)
+        upper: list[tuple[int, int]] = []
+        for p in reversed(pts):
+            while len(upper) >= 2 and _cross(upper[-2], upper[-1], p) <= 0:
+                upper.pop()
+            upper.append(p)
+        hull = lower[:-1] + upper[:-1]
+
+        # Subsample hull to at most 64 vertices to keep zones manageable
+        step = max(1, len(hull) // 64)
+        hull = hull[::step]
+
+        # ── Convert pixel hull to lat/lon coords ─────────────────────────────
+        from bimap.models.zone import LatLon, Zone, ZoneType
+        coords = [LatLon(lat=ll[0], lon=ll[1])
+                  for ll in (self.px_to_lat_lon(float(x), float(y)) for x, y in hull)]
+        if len(coords) < 3:
+            return
+        zone = Zone(zone_type=ZoneType.POLYGON, coordinates=coords, name=f"{kp.info_card.title} Zone")
+        zone.label.text = zone.name
+        self.draw_finished.emit("zone", zone)
 
     def keyPressEvent(self, event) -> None:
         self._interaction.key_press(event, self)

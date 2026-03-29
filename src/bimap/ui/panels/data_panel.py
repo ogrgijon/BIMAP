@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from bimap.i18n import t
 from bimap.models.data_source import DataSource
 
 
@@ -45,7 +46,7 @@ class DataPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 4, 2, 4)
 
-        title = QLabel("Data Sources")
+        title = QLabel(t("Data Sources"))
         title.setStyleSheet("font-weight: bold; padding: 2px;")
         layout.addWidget(title)
 

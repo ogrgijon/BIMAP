@@ -5,6 +5,7 @@ OverlayRenderer — paints zones, keypoints, and annotations on the map canvas.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
@@ -16,12 +17,19 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
     QPolygonF,
 )
+try:
+    from PyQt6.QtSvg import QSvgRenderer
+    _SVG_AVAILABLE = True
+except ImportError:
+    _SVG_AVAILABLE = False
 
 from bimap.engine.tile_math import lat_lon_to_pixel, meters_per_pixel
 from bimap.models.annotation import Annotation, AnnotationType
 from bimap.models.keypoint import Keypoint
+from bimap.models.live_layer import LiveLayer
 from bimap.models.project import Project
 from bimap.models.style import BorderStyle
 from bimap.models.zone import Zone, ZoneType
@@ -45,9 +53,17 @@ class OverlayRenderer:
         selected_id: str = "",
         multi_selected: list | None = None,
         delimitation_polygon: list | None = None,
+        show_scale_bar: bool = True,
+        show_north_arrow: bool = True,
+        live_layers: list[LiveLayer] | None = None,
+        live_positions: dict[str, list[dict]] | None = None,
+        show_grid: bool = False,
+        grid_scale: float = 1.0,
     ) -> None:
         ctx = (center_lat, center_lon, zoom, w, h)
         _multi = set(multi_selected) if multi_selected else set()
+        if show_grid:
+            self._draw_grid(painter, ctx, grid_scale)
         for zone in project.zones:
             if zone.visible:
                 self._draw_zone(painter, zone, ctx)
@@ -67,8 +83,12 @@ class OverlayRenderer:
                 self._draw_annotation(painter, ann, ctx)
         if delimitation_polygon:
             self._draw_delimitation(painter, delimitation_polygon, ctx, w, h)
-        self._draw_scale_bar(painter, center_lat, zoom, w, h)
-        self._draw_north_arrow(painter, w, h)
+        if show_scale_bar:
+            self._draw_scale_bar(painter, center_lat, zoom, w, h)
+        if show_north_arrow:
+            self._draw_north_arrow(painter, w, h)
+        if live_layers:
+            self._draw_live_layers(painter, live_layers, live_positions or {}, ctx)
 
     # ── to-pixel helper ────────────────────────────────────────────────────────
 
@@ -81,28 +101,44 @@ class OverlayRenderer:
     # ── Selection highlights ───────────────────────────────────────────────────
 
     def _draw_selection_zone(self, painter: QPainter, zone: Zone, ctx: tuple) -> None:
-        """Draw dashed cyan selection outline over a selected zone."""
+        """Draw dashed cyan selection outline over a selected zone.
+
+        Uses the same path-building and rotation logic as _draw_zone so the
+        selection outline always perfectly overlaps the rendered zone.
+        """
         pen = QPen(QColor(0, 180, 255), 2, Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         if zone.zone_type == ZoneType.CIRCLE:
             if zone.coordinates:
-                center_lat, center_lon, zoom, w, h = ctx
                 c = zone.coordinates[0]
                 px = self._to_px(c.lat, c.lon, ctx)
+                _, _, zoom, _, _ = ctx
                 mpp = meters_per_pixel(c.lat, zoom)
                 r = zone.radius_m / mpp if mpp > 0 else 0
                 painter.drawEllipse(QRectF(px.x() - r, px.y() - r, r * 2, r * 2))
         else:
-            pts = [self._to_px(c.lat, c.lon, ctx) for c in zone.coordinates]
-            if len(pts) >= 2:
-                from PyQt6.QtGui import QPolygonF as _QPolygonF
-                from PyQt6.QtGui import QPainterPath as _QPainterPath
-                poly = _QPolygonF(pts)
-                path = _QPainterPath()
-                path.addPolygon(poly)
-                path.closeSubpath()
-                painter.drawPath(path)
+            # Build selection path the same way _draw_zone does so it always
+            # matches the visual shape (including dimensioned-rect rotation).
+            if zone.zone_type == ZoneType.RECTANGLE and zone.width_m > 0 and zone.height_m > 0:
+                path = self._metered_rect_path(zone, ctx)
+            else:
+                path = self._polygon_path(zone, ctx)
+            if path is None:
+                return
+            rotation_deg = getattr(zone, "rotation_deg", 0.0)
+            rotated = rotation_deg != 0.0 and bool(zone.coordinates)
+            if rotated:
+                pxs = [self._to_px(c.lat, c.lon, ctx) for c in zone.coordinates]
+                piv_x = sum(p.x() for p in pxs) / len(pxs)
+                piv_y = sum(p.y() for p in pxs) / len(pxs)
+                painter.save()
+                painter.translate(piv_x, piv_y)
+                painter.rotate(rotation_deg)
+                painter.translate(-piv_x, -piv_y)
+            painter.drawPath(path)
+            if rotated:
+                painter.restore()
 
     def _draw_selection_keypoint(self, painter: QPainter, kp, ctx: tuple) -> None:
         """Draw a cyan ring around a selected keypoint."""
@@ -125,18 +161,32 @@ class OverlayRenderer:
             center_lat, center_lon, zoom, w, h = ctx
             c = zone.coordinates[0]
             px = self._to_px(c.lat, c.lon, ctx)
-            from bimap.engine.tile_math import meters_per_pixel
             mpp = meters_per_pixel(c.lat, zoom)
             r = zone.radius_m / mpp if mpp > 0 else 0
             painter.drawEllipse(QRectF(px.x() - r, px.y() - r, r * 2, r * 2))
         else:
             pts = [self._to_px(c.lat, c.lon, ctx) for c in zone.coordinates]
             if len(pts) >= 2:
+                rotation_deg = getattr(zone, "rotation_deg", 0.0)
+                _is_dimensioned_rect = (
+                    zone.zone_type == ZoneType.RECTANGLE
+                    and zone.width_m > 0 and zone.height_m > 0
+                )
+                _needs_rot = rotation_deg != 0.0 and not _is_dimensioned_rect
+                if _needs_rot:
+                    piv_x = sum(p.x() for p in pts) / len(pts)
+                    piv_y = sum(p.y() for p in pts) / len(pts)
+                    painter.save()
+                    painter.translate(piv_x, piv_y)
+                    painter.rotate(rotation_deg)
+                    painter.translate(-piv_x, -piv_y)
                 poly = QPolygonF(pts)
                 path = QPainterPath()
                 path.addPolygon(poly)
                 path.closeSubpath()
                 painter.drawPath(path)
+                if _needs_rot:
+                    painter.restore()
 
     def _draw_multi_select_keypoint(self, painter: QPainter, kp, ctx: tuple) -> None:
         """Draw an orange ring for keypoints in the magic-wand selection."""
@@ -238,6 +288,115 @@ class OverlayRenderer:
         painter.drawText(QRectF(cx - 5, cy - size - 1, 10, 12),
                          Qt.AlignmentFlag.AlignCenter, "N")
 
+    # ── Live-feed layer rendering ──────────────────────────────────────────────
+
+    def _draw_live_layers(
+        self,
+        painter: QPainter,
+        live_layers: list[LiveLayer],
+        live_positions: dict[str, list[dict]],
+        ctx: tuple,
+    ) -> None:
+        for layer in live_layers:
+            if not layer.visible:
+                continue
+            positions = live_positions.get(layer.id, [])
+            if not positions:
+                continue
+            color = QColor(layer.icon_color)
+            label_font = QFont("Arial", max(7, layer.icon_size - 4))
+            icon_font = QFont("Arial", layer.icon_size)
+
+            # Draw trail polylines first (bottom layer)
+            trail = layer.trail_length
+            if trail > 0:
+                trail_pen = QPen(color, 1.5, Qt.PenStyle.SolidLine)
+                trail_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(trail_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                # trail_positions may hold the recent history stored per marker
+                for pos in positions:
+                    history = pos.get("_trail")
+                    if isinstance(history, list) and len(history) >= 2:
+                        pts = [self._to_px(p["lat"], p["lon"], ctx) for p in history[-trail:]]
+                        for i in range(1, len(pts)):
+                            alpha = int(80 + 120 * i / len(pts))
+                            tc = QColor(color)
+                            tc.setAlpha(alpha)
+                            trail_pen.setColor(tc)
+                            painter.setPen(trail_pen)
+                            painter.drawLine(pts[i - 1], pts[i])
+
+            # Draw markers
+            for pos in positions:
+                px = self._to_px(pos["lat"], pos["lon"], ctx)
+                heading = pos.get("heading")
+                icon_glyph = layer.icon  # Unicode glyph (may be multi-codepoint emoji)
+                use_glyph = icon_glyph not in ("▶", "●", "")
+
+                # When the layer icon is a directional arrow (▶) and heading is
+                # known, draw a proper rotated geometric arrow.
+                if heading is not None and not use_glyph:
+                    try:
+                        h_deg = float(heading)
+                    except (TypeError, ValueError):
+                        h_deg = 0.0
+                    painter.save()
+                    painter.translate(px)
+                    painter.rotate(h_deg)
+                    arrow_pen = QPen(color, 1)
+                    painter.setPen(arrow_pen)
+                    painter.setBrush(QBrush(color))
+                    r = layer.icon_size / 2.0
+                    arrow = QPainterPath()
+                    arrow.moveTo(0, -r * 1.4)
+                    arrow.lineTo(-r * 0.55, r * 0.7)
+                    arrow.lineTo(0, r * 0.2)
+                    arrow.lineTo(r * 0.55, r * 0.7)
+                    arrow.closeSubpath()
+                    painter.drawPath(arrow)
+                    painter.restore()
+                elif use_glyph:
+                    # Draw Unicode/emoji icon centred on the position
+                    painter.setFont(icon_font)
+                    metrics = QFontMetricsF(icon_font)
+                    gw = metrics.horizontalAdvance(icon_glyph)
+                    gh = metrics.height()
+                    painter.setPen(color)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawText(
+                        QRectF(px.x() - gw / 2, px.y() - gh / 2, gw, gh),
+                        Qt.AlignmentFlag.AlignCenter,
+                        icon_glyph,
+                    )
+                else:
+                    # Dot marker (● or empty icon)
+                    r = layer.icon_size / 2.0
+                    dot_color = QColor(color)
+                    dot_color.setAlpha(220)
+                    painter.setBrush(QBrush(dot_color))
+                    outline = QPen(QColor(0, 0, 0, 80), 1)
+                    painter.setPen(outline)
+                    painter.drawEllipse(QRectF(px.x() - r, px.y() - r, r * 2, r * 2))
+
+                # Label
+                label = pos.get("label", "")
+                _, _, zoom, _, _ = ctx
+                if label and zoom >= 8:
+                    painter.setFont(label_font)
+                    metrics = QFontMetricsF(label_font)
+                    lw = metrics.horizontalAdvance(label) + 4
+                    lh = metrics.height()
+                    lx = px.x() - lw / 2
+                    ly = px.y() - layer.icon_size - 3 - lh
+                    bg = QColor(0, 0, 0, 140)
+                    painter.setBrush(QBrush(bg))
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawRoundedRect(QRectF(lx, ly, lw, lh), 2, 2)
+                    painter.setPen(QColor(255, 255, 255, 230))
+                    painter.drawText(QRectF(lx, ly, lw, lh),
+                                     Qt.AlignmentFlag.AlignCenter, label)
+
     # ── Zone rendering ─────────────────────────────────────────────────────────
 
     def _draw_zone(self, painter: QPainter, zone: Zone, ctx: tuple) -> None:
@@ -259,36 +418,107 @@ class OverlayRenderer:
         painter.setBrush(QBrush(fill))
 
         if zone.zone_type == ZoneType.CIRCLE:
-            self._draw_circle_zone(painter, zone, ctx)
+            zone_path = self._circle_path(zone, ctx)
+        elif (
+            zone.zone_type == ZoneType.RECTANGLE
+            and zone.width_m > 0
+            and zone.height_m > 0
+        ):
+            zone_path = self._metered_rect_path(zone, ctx)
         else:
-            self._draw_polygon_zone(painter, zone, ctx)
+            zone_path = self._polygon_path(zone, ctx)
+
+        if zone_path is not None:
+            rotation_deg = getattr(zone, "rotation_deg", 0.0)
+            rotated = rotation_deg != 0.0 and zone.zone_type != ZoneType.CIRCLE
+            if rotated and zone.coordinates:
+                pxs = [self._to_px(c.lat, c.lon, ctx) for c in zone.coordinates]
+                pivot_x = sum(p.x() for p in pxs) / len(pxs)
+                pivot_y = sum(p.y() for p in pxs) / len(pxs)
+                painter.save()
+                painter.translate(pivot_x, pivot_y)
+                painter.rotate(rotation_deg)
+                painter.translate(-pivot_x, -pivot_y)
+            painter.drawPath(zone_path)
+            if zone.svg_fill_url and os.path.isfile(zone.svg_fill_url):
+                self._draw_svg_fill(painter, zone_path, zone.svg_fill_url)
+            if rotated:
+                painter.restore()
 
         # Zone label
         if zone.label and zone.label.text:
-            self._draw_zone_label(painter, zone, ctx)
+            _, _, zoom, _, _ = ctx
+            if zoom >= 8:
+                self._draw_zone_label(painter, zone, ctx)
 
-    def _draw_polygon_zone(self, painter: QPainter, zone: Zone, ctx: tuple) -> None:
+    def _polygon_path(self, zone: Zone, ctx: tuple) -> QPainterPath | None:
         pts = [self._to_px(c.lat, c.lon, ctx) for c in zone.coordinates]
         if len(pts) < 2:
-            return
+            return None
         poly = QPolygonF(pts)
         path = QPainterPath()
         path.addPolygon(poly)
         path.closeSubpath()
-        painter.drawPath(path)
+        return path
 
-    def _draw_circle_zone(self, painter: QPainter, zone: Zone, ctx: tuple) -> None:
+    def _circle_path(self, zone: Zone, ctx: tuple) -> QPainterPath | None:
         if not zone.coordinates:
-            return
-        center_lat, center_lon, zoom, w, h = ctx
+            return None
+        _, _, zoom, _, _ = ctx
         c = zone.coordinates[0]
         px = self._to_px(c.lat, c.lon, ctx)
         mpp = meters_per_pixel(c.lat, zoom)
         radius_px = zone.radius_m / mpp if mpp > 0 else 0
-        painter.drawEllipse(
-            QRectF(px.x() - radius_px, px.y() - radius_px,
-                   radius_px * 2, radius_px * 2)
-        )
+        rect = QRectF(px.x() - radius_px, px.y() - radius_px,
+                      radius_px * 2, radius_px * 2)
+        path = QPainterPath()
+        path.addEllipse(rect)
+        return path
+
+    def _metered_rect_path(self, zone: Zone, ctx: tuple) -> QPainterPath | None:
+        """Build a rectangle QPainterPath sized in metres, centred on the zone's centroid."""
+        if not zone.coordinates:
+            return None
+        _, _, zoom, _, _ = ctx
+        pts = [self._to_px(c.lat, c.lon, ctx) for c in zone.coordinates]
+        if not pts:
+            return None
+        cx = sum(p.x() for p in pts) / len(pts)
+        cy = sum(p.y() for p in pts) / len(pts)
+        # Use lat of first coord for mpp approximation
+        mpp = meters_per_pixel(zone.coordinates[0].lat, zoom)
+        hw = (zone.width_m / 2.0) / mpp if mpp > 0 else 0
+        hh = (zone.height_m / 2.0) / mpp if mpp > 0 else 0
+        rect = QRectF(cx - hw, cy - hh, hw * 2, hh * 2)
+        path = QPainterPath()
+        path.addRect(rect)
+        return path
+
+    def _draw_svg_fill(self, painter: QPainter, clip_path: QPainterPath, svg_url: str) -> None:
+        """Render an SVG file tiled/fitted inside a painter path, clipped to the path."""
+        try:
+            from PyQt6.QtSvg import QSvgRenderer
+        except ImportError:
+            return
+        renderer = QSvgRenderer(svg_url)
+        if not renderer.isValid():
+            return
+        bounds = clip_path.boundingRect()
+        painter.save()
+        painter.setClipPath(clip_path, Qt.ClipOperation.IntersectClip)
+        renderer.render(painter, bounds)
+        painter.restore()
+
+    # ── Kept for backward-compat (called nowhere externally but guard anyway) ─ #
+    def _draw_polygon_zone(self, painter: QPainter, zone: Zone, ctx: tuple) -> None:
+        path = self._polygon_path(zone, ctx)
+        if path is not None:
+            painter.drawPath(path)
+
+    def _draw_circle_zone(self, painter: QPainter, zone: Zone, ctx: tuple) -> None:
+        path = self._circle_path(zone, ctx)
+        if path is not None:
+            painter.drawPath(path)
 
     def _draw_zone_label(self, painter: QPainter, zone: Zone, ctx: tuple) -> None:
         ls = zone.label.style
@@ -311,6 +541,80 @@ class OverlayRenderer:
                                      pos.y() + zone.label.offset_y),
                              zone.label.text)
 
+            # Dimension sub-label
+            dim_text = ""
+            if (zone.zone_type == ZoneType.RECTANGLE
+                    and getattr(zone, "width_m", 0) > 0
+                    and getattr(zone, "height_m", 0) > 0):
+                dim_text = f"({zone.width_m:.1f} x {zone.height_m:.1f} m)"
+            elif (zone.zone_type == ZoneType.CIRCLE
+                    and getattr(zone, "radius_m", 0) > 0):
+                dim_text = f"(r={zone.radius_m:.1f} m)"
+            if dim_text:
+                font2 = QFont(ls.font_family, max(ls.font_size - 2, 7))
+                painter.setFont(font2)
+                painter.drawText(
+                    QPointF(pos.x() + zone.label.offset_x,
+                            pos.y() + zone.label.offset_y + ls.font_size + 3),
+                    dim_text,
+                )
+
+    # ── Keypoint rendering ─────────────────────────────────────────────────────
+
+    def _draw_grid(self, painter: QPainter, ctx: tuple, grid_scale: float = 1.0) -> None:
+        """Draw a coordinate grid (precision / 'square paper' overlay)."""
+        from bimap.engine.tile_math import pixel_to_lat_lon
+        center_lat, center_lon, zoom, w, h = ctx
+        mpp = meters_per_pixel(center_lat, zoom)
+
+        # Choose a base grid spacing that gives 5–25 lines across the viewport
+        for spacing_m in (10, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+                          10000, 25000, 50000, 100000, 250000, 500000):
+            spacing_px = spacing_m / mpp
+            if w / spacing_px < 25:
+                break
+
+        # Apply user density multiplier (>1 = coarser, <1 = finer)
+        spacing_m *= grid_scale
+
+        # Convert to degrees
+        spacing_lat = spacing_m / 111_320.0
+        spacing_lon = spacing_m / (111_320.0 * math.cos(math.radians(center_lat)) + 1e-9)
+
+        # Corners in lat/lon
+        tl_lat, tl_lon = pixel_to_lat_lon(0, 0, center_lat, center_lon, zoom, w, h)
+        br_lat, br_lon = pixel_to_lat_lon(w, h, center_lat, center_lon, zoom, w, h)
+
+        pen_line = QPen(QColor(80, 160, 220, 100), 1)
+        pen_label = QPen(QColor(120, 200, 255, 200))
+        font = QFont("Consolas", 7)
+        painter.setFont(font)
+
+        # Vertical grid lines (constant longitude)
+        start_lon = math.floor(min(tl_lon, br_lon) / spacing_lon) * spacing_lon
+        end_lon = math.ceil(max(tl_lon, br_lon) / spacing_lon) * spacing_lon
+        lon_val = start_lon
+        while lon_val <= end_lon:
+            p_top = self._to_px(tl_lat, lon_val, ctx)
+            p_bot = self._to_px(br_lat, lon_val, ctx)
+            painter.setPen(pen_line)
+            painter.drawLine(QPointF(p_top.x(), 0), QPointF(p_top.x(), h))
+            painter.setPen(pen_label)
+            painter.drawText(QPointF(p_top.x() + 2, 10), f"{lon_val:.4f}")
+            lon_val += spacing_lon
+
+        # Horizontal grid lines (constant latitude)
+        start_lat = math.floor(min(tl_lat, br_lat) / spacing_lat) * spacing_lat
+        end_lat = math.ceil(max(tl_lat, br_lat) / spacing_lat) * spacing_lat
+        lat_val = start_lat
+        while lat_val <= end_lat:
+            p_left = self._to_px(lat_val, tl_lon, ctx)
+            painter.setPen(pen_line)
+            painter.drawLine(QPointF(0, p_left.y()), QPointF(w, p_left.y()))
+            painter.setPen(pen_label)
+            painter.drawText(QPointF(2, p_left.y() - 2), f"{lat_val:.4f}")
+            lat_val += spacing_lat
+
     # ── Keypoint rendering ─────────────────────────────────────────────────────
 
     def _draw_keypoint(self, painter: QPainter, kp: Keypoint, ctx: tuple) -> None:
@@ -318,26 +622,89 @@ class OverlayRenderer:
         size = kp.icon_size
         color = QColor(kp.icon_color)
         shadow = QColor(0, 0, 0, 80)
+        icon_val = getattr(kp, "icon", "pin")
 
-        # Draw pin shape: circle with dot + stem
-        painter.setPen(QPen(shadow, 1))
-        painter.setBrush(QBrush(color))
-        # Circle head
-        painter.drawEllipse(
-            QRectF(pos.x() - size / 2, pos.y() - size * 1.5, size, size)
-        )
-        # Dot centre
-        painter.setBrush(QBrush(QColor(255, 255, 255, 200)))
-        dot = size * 0.3
-        painter.drawEllipse(
-            QRectF(pos.x() - dot / 2, pos.y() - size * 1.5 + (size - dot) / 2, dot, dot)
-        )
-        # Stem
-        painter.setPen(QPen(color, 2))
-        painter.drawLine(
-            QPointF(pos.x(), pos.y() - size * 0.5),
-            QPointF(pos.x(), pos.y())
-        )
+        # ── Custom file icon (SVG or raster) ─────────────────────────────── #
+        if icon_val and icon_val not in ("pin", "circle", "star", "square", "diamond") \
+                and os.path.isfile(icon_val):
+            rect = QRectF(pos.x() - size, pos.y() - size * 2, size * 2, size * 2)
+            ext = os.path.splitext(icon_val)[1].lower()
+            if ext == ".svg" and _SVG_AVAILABLE:
+                renderer = QSvgRenderer(icon_val)
+                painter.save()
+                renderer.render(painter, rect)
+                painter.restore()
+            else:
+                pix = QPixmap(icon_val)
+                if not pix.isNull():
+                    pix = pix.scaled(
+                        int(size * 2), int(size * 2),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    painter.drawPixmap(
+                        int(pos.x() - pix.width() / 2),
+                        int(pos.y() - pix.height()),
+                        pix,
+                    )
+
+        # ── Built-in icon shapes ──────────────────────────────────────────── #
+        elif icon_val == "circle":
+            painter.setPen(QPen(shadow, 1))
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(QRectF(pos.x() - size / 2, pos.y() - size, size, size))
+
+        elif icon_val == "square":
+            painter.setPen(QPen(shadow, 1))
+            painter.setBrush(QBrush(color))
+            painter.drawRect(QRectF(pos.x() - size / 2, pos.y() - size, size, size))
+
+        elif icon_val == "diamond":
+            painter.setPen(QPen(shadow, 1))
+            painter.setBrush(QBrush(color))
+            cx, cy = pos.x(), pos.y() - size * 0.5
+            pts = QPolygonF([
+                QPointF(cx, cy - size * 0.5),
+                QPointF(cx + size * 0.5, cy),
+                QPointF(cx, cy + size * 0.5),
+                QPointF(cx - size * 0.5, cy),
+            ])
+            painter.drawPolygon(pts)
+
+        elif icon_val == "star":
+            painter.setPen(QPen(shadow, 1))
+            painter.setBrush(QBrush(color))
+            cx, cy = pos.x(), pos.y() - size
+            path = QPainterPath()
+            outer, inner = size * 0.5, size * 0.2
+            for i in range(10):
+                angle = math.radians(i * 36 - 90)
+                r = outer if i % 2 == 0 else inner
+                x, y = cx + r * math.cos(angle), cy + r * math.sin(angle)
+                if i == 0:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+            path.closeSubpath()
+            painter.drawPath(path)
+
+        else:  # default: "pin"
+            # Draw pin shape: circle with dot + stem
+            painter.setPen(QPen(shadow, 1))
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(
+                QRectF(pos.x() - size / 2, pos.y() - size * 1.5, size, size)
+            )
+            painter.setBrush(QBrush(QColor(255, 255, 255, 200)))
+            dot = size * 0.3
+            painter.drawEllipse(
+                QRectF(pos.x() - dot / 2, pos.y() - size * 1.5 + (size - dot) / 2, dot, dot)
+            )
+            painter.setPen(QPen(color, 2))
+            painter.drawLine(
+                QPointF(pos.x(), pos.y() - size * 0.5),
+                QPointF(pos.x(), pos.y())
+            )
 
         # Keynote number badge
         if kp.keynote_number is not None:
@@ -354,7 +721,8 @@ class OverlayRenderer:
 
         # Title label below pin
         title = kp.info_card.title
-        if title:
+        _, _, zoom, _, _ = ctx
+        if title and zoom >= 8:
             label_font = QFont("Arial", 9)
             painter.setFont(label_font)
             painter.setPen(QColor(30, 30, 30))

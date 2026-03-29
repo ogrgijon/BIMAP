@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 from bimap.config import MAX_ZOOM, MIN_ZOOM, PDF_PAGE_SIZES
+from bimap.i18n import t
 from bimap.models.pdf_layout import PageOrientation, PDFLayout
 
 
@@ -72,7 +73,7 @@ class MapComposerDialog(QDialog):
         self._preview_frame_w: int = 400
         self._preview_frame_h: int = 480
 
-        self.setWindowTitle("Map Composer")
+        self.setWindowTitle(t("Map Composer"))
         self.setMinimumSize(960, 600)
         self._setup_ui()
 
@@ -92,19 +93,19 @@ class MapComposerDialog(QDialog):
         lv.setSpacing(10)
 
         tabs = QTabWidget()
-        tabs.addTab(self._make_page_tab(), "Page && Zoom")
-        tabs.addTab(self._make_legend_tab(), "Legend")
-        tabs.addTab(self._make_title_block_tab(), "Title Block")
-        tabs.addTab(self._make_info_box_tab(), "Info Box")
+        tabs.addTab(self._make_page_tab(), t("Page && Zoom"))
+        tabs.addTab(self._make_legend_tab(), t("Legend"))
+        tabs.addTab(self._make_title_block_tab(), t("Title Block"))
+        tabs.addTab(self._make_info_box_tab(), t("Info Box"))
         lv.addWidget(tabs)
 
         lv.addWidget(self._make_output_section())
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        btn_cancel = QPushButton("Cancel")
-        self._btn_print = QPushButton("🖶  Print…")
-        self._btn_export = QPushButton("📄  Export PDF")
+        btn_cancel = QPushButton(t("Cancel"))
+        self._btn_print = QPushButton(t("🖶  Print…"))
+        self._btn_export = QPushButton(t("📄  Export PDF"))
         self._btn_export.setDefault(True)
         btn_cancel.clicked.connect(self.reject)
         self._btn_print.clicked.connect(self._on_print)
@@ -133,18 +134,20 @@ class MapComposerDialog(QDialog):
         for key in PDF_PAGE_SIZES:
             self._size_combo.addItem(key)
         self._size_combo.setCurrentText(self._layout.page_size)
-        form.addRow("Page Size", self._size_combo)
+        form.addRow(t("Page Size"), self._size_combo)
 
         self._orient_combo = QComboBox()
-        self._orient_combo.addItems(["landscape", "portrait"])
-        self._orient_combo.setCurrentText(self._layout.orientation)
-        form.addRow("Orientation", self._orient_combo)
+        self._orient_combo.addItem(t("landscape"), "landscape")
+        self._orient_combo.addItem(t("portrait"), "portrait")
+        idx = self._orient_combo.findData(str(self._layout.orientation))
+        self._orient_combo.setCurrentIndex(max(0, idx))
+        form.addRow(t("Orientation"), self._orient_combo)
 
         self._dpi_spin = QSpinBox()
         self._dpi_spin.setRange(72, 600)
         self._dpi_spin.setSingleStep(50)
         self._dpi_spin.setValue(self._layout.dpi)
-        form.addRow("DPI", self._dpi_spin)
+        form.addRow(t("DPI"), self._dpi_spin)
 
         form.addRow(QLabel())  # spacer
 
@@ -164,7 +167,7 @@ class MapComposerDialog(QDialog):
         zoom_row.addWidget(self._zoom_spin)
         zoom_row.addWidget(note)
         zoom_row.addStretch()
-        form.addRow("Capture Zoom", zoom_w)
+        form.addRow(t("Capture Zoom"), zoom_w)
 
         return tab
 
@@ -174,22 +177,22 @@ class MapComposerDialog(QDialog):
         vbox.setContentsMargins(12, 14, 12, 12)
         vbox.setSpacing(8)
 
-        self._legend_chk = QCheckBox("Show legend overlay on output")
+        self._legend_chk = QCheckBox(t("Show legend overlay on output"))
         self._legend_chk.setChecked(self._layout.show_legend)
         vbox.addWidget(self._legend_chk)
 
         title_row = QFormLayout()
         title_row.setContentsMargins(0, 4, 0, 4)
         self._legend_title_edit = QLineEdit(self._layout.legend_title)
-        title_row.addRow("Legend Title", self._legend_title_edit)
+        title_row.addRow(t("Legend Title"), self._legend_title_edit)
         vbox.addLayout(title_row)
 
         vbox.addWidget(
-            QLabel("Zones (uncheck to hide, edit Display Label to rename):")
+            QLabel(t("Zones (uncheck to hide, edit Display Label to rename):"))
         )
 
         self._legend_table = QTableWidget(len(self._layer_names), 2)
-        self._legend_table.setHorizontalHeaderLabels(["Layer", "Display Label"])
+        self._legend_table.setHorizontalHeaderLabels([t("Layer"), t("Display Label")])
         self._legend_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
         )
@@ -234,7 +237,7 @@ class MapComposerDialog(QDialog):
         vbox.setContentsMargins(12, 14, 12, 12)
         vbox.setSpacing(8)
 
-        self._tb_enabled_chk = QCheckBox("Show architectural title block on output")
+        self._tb_enabled_chk = QCheckBox(t("Show architectural title block on output"))
         self._tb_enabled_chk.setChecked(self._layout.tb_enabled)
         vbox.addWidget(self._tb_enabled_chk)
 
@@ -256,33 +259,33 @@ class MapComposerDialog(QDialog):
 
         self._tb_project_name_edit = QLineEdit(self._layout.tb_project_name)
         self._tb_project_name_edit.setPlaceholderText(
-            self._project_name or "Project name (leave blank to use project name)"
+            self._project_name or t("Project Name")
         )
-        form.addRow("Project Name", self._tb_project_name_edit)
+        form.addRow(t("Project Name"), self._tb_project_name_edit)
 
         self._tb_desc_edit = QLineEdit(self._layout.tb_description)
-        self._tb_desc_edit.setPlaceholderText("Subtitle / description")
-        form.addRow("Description", self._tb_desc_edit)
+        self._tb_desc_edit.setPlaceholderText(t("Description"))
+        form.addRow(t("Description"), self._tb_desc_edit)
 
         self._tb_drawn_edit = QLineEdit(self._layout.tb_drawn_by)
-        self._tb_drawn_edit.setPlaceholderText("e.g. J. Smith")
-        form.addRow("Drawn by", self._tb_drawn_edit)
+        self._tb_drawn_edit.setPlaceholderText(t("Drawn by"))
+        form.addRow(t("Drawn by"), self._tb_drawn_edit)
 
         self._tb_checked_edit = QLineEdit(self._layout.tb_checked_by)
-        self._tb_checked_edit.setPlaceholderText("e.g. A. Jones")
-        form.addRow("Checked by", self._tb_checked_edit)
+        self._tb_checked_edit.setPlaceholderText(t("Checked by"))
+        form.addRow(t("Checked by"), self._tb_checked_edit)
 
         self._tb_rev_edit = QLineEdit(self._layout.tb_revision)
-        self._tb_rev_edit.setPlaceholderText("e.g. A, B, 01")
-        form.addRow("Revision", self._tb_rev_edit)
+        self._tb_rev_edit.setPlaceholderText(t("Revision"))
+        form.addRow(t("Revision"), self._tb_rev_edit)
 
         self._tb_scale_edit = QLineEdit(self._layout.tb_scale)
-        self._tb_scale_edit.setPlaceholderText("e.g. 1:25000 or 1:NTS")
-        form.addRow("Scale", self._tb_scale_edit)
+        self._tb_scale_edit.setPlaceholderText(t("Scale"))
+        form.addRow(t("Scale"), self._tb_scale_edit)
 
         self._tb_sheet_edit = QLineEdit(self._layout.tb_sheet)
-        self._tb_sheet_edit.setPlaceholderText("e.g. 1 / 3")
-        form.addRow("Sheet", self._tb_sheet_edit)
+        self._tb_sheet_edit.setPlaceholderText(t("Sheet"))
+        form.addRow(t("Sheet"), self._tb_sheet_edit)
 
         vbox.addWidget(self._tb_fields_widget)
         vbox.addStretch()
@@ -301,11 +304,11 @@ class MapComposerDialog(QDialog):
         vbox.setContentsMargins(12, 14, 12, 12)
         vbox.setSpacing(8)
 
-        self._info_chk = QCheckBox("Show info box overlay on output")
+        self._info_chk = QCheckBox(t("Show info box overlay on output"))
         self._info_chk.setChecked(self._layout.show_info_box)
         vbox.addWidget(self._info_chk)
 
-        vbox.addWidget(QLabel("Text block (appears in the info box):"))
+        vbox.addWidget(QLabel(t("Text block (appears in the info box):")))
         self._info_text_edit = QTextEdit(self._layout.info_box_text)
         self._info_text_edit.setMaximumHeight(110)
         self._info_text_edit.setPlaceholderText(
@@ -317,11 +320,11 @@ class MapComposerDialog(QDialog):
         form_row.setContentsMargins(0, 6, 0, 4)
         form_row.setVerticalSpacing(6)
         self._info_author_edit = QLineEdit(self._layout.info_box_author)
-        self._info_author_edit.setPlaceholderText("Author name")
-        form_row.addRow("Author", self._info_author_edit)
+        self._info_author_edit.setPlaceholderText(t("Author"))
+        form_row.addRow(t("Author"), self._info_author_edit)
         self._info_date_edit = QLineEdit(self._layout.info_box_date)
-        self._info_date_edit.setPlaceholderText("e.g. 2026-03-21")
-        form_row.addRow("Date", self._info_date_edit)
+        self._info_date_edit.setPlaceholderText(t("Date"))
+        form_row.addRow(t("Date"), self._info_date_edit)
         vbox.addLayout(form_row)
 
         def _toggle_info(checked: bool) -> None:
@@ -339,12 +342,12 @@ class MapComposerDialog(QDialog):
         return tab
 
     def _make_output_section(self) -> QGroupBox:
-        grp = QGroupBox("Output File  (required for Export PDF)")
+        grp = QGroupBox(t("Output File  (required for Export PDF)"))
         row = QHBoxLayout(grp)
         row.setContentsMargins(8, 6, 8, 6)
         self._path_edit = QLineEdit()
-        self._path_edit.setPlaceholderText("Choose output .pdf path…")
-        btn_browse = QPushButton("Browse…")
+        self._path_edit.setPlaceholderText(t("Choose output .pdf path…"))
+        btn_browse = QPushButton(t("Browse…"))
         btn_browse.clicked.connect(self._browse)
         row.addWidget(self._path_edit)
         row.addWidget(btn_browse)
@@ -488,7 +491,7 @@ class MapComposerDialog(QDialog):
         """Return a PDFLayout copy reflecting the current form state (not committed to self._layout)."""
         tmp = copy.deepcopy(self._layout)
         tmp.page_size = self._size_combo.currentText()
-        tmp.orientation = PageOrientation(self._orient_combo.currentText())
+        tmp.orientation = PageOrientation(self._orient_combo.currentData())
         tmp.dpi = self._dpi_spin.value()
         tmp.capture_zoom = self._zoom_spin.value()
         tmp.show_legend = self._legend_chk.isChecked()
@@ -893,7 +896,7 @@ class MapComposerDialog(QDialog):
 
     def _commit_values(self) -> None:
         self._layout.page_size = self._size_combo.currentText()
-        self._layout.orientation = PageOrientation(self._orient_combo.currentText())
+        self._layout.orientation = PageOrientation(self._orient_combo.currentData())
         self._layout.dpi = self._dpi_spin.value()
         self._layout.capture_zoom = self._zoom_spin.value()
 
